@@ -70,8 +70,24 @@ collect_config() {
   askd "Worker name" "vaultwarden"
   WORKER_NAME="$REPLY"
 
-  askd "Domain (your worker URL, e.g. https://vaultwarden.you.workers.dev)" "https://${WORKER_NAME}.$(npx wrangler whoami 2>/dev/null | grep -oP '\w+\.workers\.dev' || echo 'YOUR_SUBDOMAIN.workers.dev')"
-  DOMAIN="$REPLY"
+  echo ""
+  echo -e "  Domain options:"
+  echo -e "    ${BOLD}custom${NC}  — use your own domain (e.g. vault.yourdomain.com)"
+  echo -e "    ${BOLD}default${NC} — use workers.dev / pages.dev subdomains"
+  echo ""
+  askd "Domain type (custom/default)" "custom"
+  DOMAIN_TYPE="$REPLY"
+
+  CUSTOM_DOMAIN=""
+  if [ "$DOMAIN_TYPE" = "custom" ]; then
+    ask "Your domain (e.g. vault.example.com): "
+    CUSTOM_DOMAIN="$REPLY"
+    DOMAIN="https://${CUSTOM_DOMAIN}"
+  else
+    DOMAIN="https://${WORKER_NAME}.$(npx wrangler whoami 2>/dev/null | grep -oP '\w+\.workers\.dev' || echo 'YOUR_SUBDOMAIN.workers.dev')"
+    askd "Domain" "$DOMAIN"
+    DOMAIN="$REPLY"
+  fi
 
   echo ""
   echo -e "  Signup modes:"
@@ -88,33 +104,79 @@ collect_config() {
   echo ""
   echo -e "${BOLD}── Email Configuration ──${NC}"
   echo ""
-  askd "Enable email sending? (true/false)" "false"
-  MAIL_ENABLED="$REPLY"
+  echo -e "  Email is used for: invites, 2FA codes, password hints"
+  echo ""
+  askd "Enable email sending? (yes/no)" "yes"
+  if [ "$REPLY" = "yes" ] || [ "$REPLY" = "true" ]; then
+    MAIL_ENABLED="true"
+  else
+    MAIL_ENABLED="false"
+  fi
 
   MAIL_BACKEND="cloudflare"
   MAIL_FROM="vaultwarden@yourdomain.com"
   MAIL_FROM_NAME="Vaultwarden"
   MAILGUN_DOMAIN=""
   HAS_MAIL_API_KEY=false
+  USE_CF_EMAIL=false
 
   if [ "$MAIL_ENABLED" = "true" ]; then
-    askd "Email backend (cloudflare/mailgun/sendgrid/resend)" "mailgun"
+    echo ""
+    echo -e "  Email backends:"
+    echo -e "    ${BOLD}cloudflare${NC}  — Cloudflare Email Workers (free, requires Email Routing on your domain)"
+    echo -e "    ${BOLD}mailgun${NC}     — Mailgun API (1,000 free/month)"
+    echo -e "    ${BOLD}resend${NC}      — Resend API (3,000 free/month)"
+    echo -e "    ${BOLD}sendgrid${NC}    — SendGrid API (100 free/day)"
+    echo ""
+
+    if [ -n "$CUSTOM_DOMAIN" ]; then
+      askd "Email backend" "cloudflare"
+    else
+      echo -e "  ${YELLOW}Note:${NC} Cloudflare Email Workers requires a custom domain with Email Routing."
+      askd "Email backend" "mailgun"
+    fi
     MAIL_BACKEND="$REPLY"
 
-    askd "From email address" "vaultwarden@yourdomain.com"
+    # Extract domain from CUSTOM_DOMAIN or ask
+    if [ -n "$CUSTOM_DOMAIN" ]; then
+      # Get the root domain (e.g. vault.example.com → example.com)
+      ROOT_DOMAIN=$(echo "$CUSTOM_DOMAIN" | awk -F. '{if(NF>2) print $(NF-1)"."$NF; else print $0}')
+      askd "From email address" "vaultwarden@${ROOT_DOMAIN}"
+    else
+      askd "From email address" "vaultwarden@yourdomain.com"
+    fi
     MAIL_FROM="$REPLY"
 
     askd "From display name" "Vaultwarden"
     MAIL_FROM_NAME="$REPLY"
 
-    if [ "$MAIL_BACKEND" = "mailgun" ]; then
+    if [ "$MAIL_BACKEND" = "cloudflare" ]; then
+      USE_CF_EMAIL=true
+      # Extract domain from MAIL_FROM
+      EMAIL_DOMAIN="${MAIL_FROM#*@}"
+      echo ""
+      echo -e "  ${BLUE}Cloudflare Email Workers setup requires:${NC}"
+      echo -e "    1. Domain '${BOLD}${EMAIL_DOMAIN}${NC}' must be added to your Cloudflare account"
+      echo -e "    2. Email Routing must be enabled on the domain"
+      echo -e "       → Cloudflare Dashboard > ${EMAIL_DOMAIN} > Email > Email Routing > Enable"
+      echo -e "    3. A verified destination email (your personal email)"
+      echo ""
+      ask "Press Enter when Email Routing is enabled (or 'skip' to configure later): "
+      if [ "$REPLY" = "skip" ]; then
+        warn "Email will be configured but won't work until Email Routing is enabled."
+      fi
+
+    elif [ "$MAIL_BACKEND" = "mailgun" ]; then
       askd "Mailgun domain (e.g. mg.yourdomain.com)" "mg.yourdomain.com"
       MAILGUN_DOMAIN="$REPLY"
-    fi
-
-    if [ "$MAIL_BACKEND" != "cloudflare" ]; then
       HAS_MAIL_API_KEY=true
-      ask "Mail API key (will be stored as a secret): "
+      ask "Mailgun API key (will be stored as a secret): "
+      MAIL_API_KEY="$REPLY"
+
+    else
+      # resend or sendgrid
+      HAS_MAIL_API_KEY=true
+      ask "${MAIL_BACKEND} API key (will be stored as a secret): "
       MAIL_API_KEY="$REPLY"
     fi
   fi
@@ -170,8 +232,10 @@ confirm_deploy() {
   echo ""
   echo -e "  Worker name:     ${GREEN}${WORKER_NAME}${NC}"
   echo -e "  Domain:          ${GREEN}${DOMAIN}${NC}"
-  echo -e "  Signups:         ${SIGNUPS_ALLOWED}"
+  [ -n "$CUSTOM_DOMAIN" ] && echo -e "  Custom domain:   ${GREEN}${CUSTOM_DOMAIN}${NC}"
+  echo -e "  Signups:         $([ "$SIGNUPS_ALLOWED" = "true" ] && echo "open" || echo "invite-only")"
   echo -e "  Email:           ${MAIL_ENABLED}$([ "$MAIL_ENABLED" = "true" ] && echo " (${MAIL_BACKEND})")"
+  [ "$USE_CF_EMAIL" = true ] && echo -e "  Email domain:    ${MAIL_FROM#*@}"
   echo -e "  SSO:             ${SSO_ENABLED}$([ "$SSO_ENABLED" = "true" ] && echo " (${SSO_AUTHORITY})")"
   echo -e "  Admin panel:     $([ -n "$ADMIN_TOKEN" ] && echo "enabled" || echo "disabled")"
   echo -e "  Web vault:       $([ "$DEPLOY_VAULT" = "yes" ] && echo "${PAGES_PROJECT}" || echo "skip")"
@@ -182,6 +246,7 @@ confirm_deploy() {
   echo -e "    • R2 bucket: ${WORKER_NAME}-attachments"
   echo -e "    • Worker: ${WORKER_NAME}"
   [ "$DEPLOY_VAULT" = "yes" ] && echo -e "    • Pages project: ${PAGES_PROJECT}"
+  [ -n "$CUSTOM_DOMAIN" ] && echo -e "    • Custom domain: ${CUSTOM_DOMAIN} (DNS records)"
   echo ""
   echo -e "  ${BOLD}Secrets that will be set:${NC}"
   echo -e "    • RSA_PRIVATE_KEY_PEM (auto-generated)"
@@ -302,6 +367,26 @@ tag = "v1"
 new_classes = ["NotificationHub"]
 TOMLEOF
 
+  # Add send_email binding if using Cloudflare Email Workers
+  if [ "$USE_CF_EMAIL" = true ]; then
+    cat >> wrangler.toml << 'TOMLEOF'
+
+[[send_email]]
+name = "SEND_EMAIL"
+TOMLEOF
+  fi
+
+  # Add custom domain route if configured
+  if [ -n "$CUSTOM_DOMAIN" ]; then
+    cat >> wrangler.toml << TOMLEOF
+
+[env.production]
+routes = [
+  { pattern = "${CUSTOM_DOMAIN}", custom_domain = true }
+]
+TOMLEOF
+  fi
+
   # Clean up empty lines from optional vars
   sed -i '/^$/d' wrangler.toml
   # Re-add a blank line before each section
@@ -392,26 +477,67 @@ TOMLEOF
   echo -e "${GREEN}  Deployment Complete!${NC}"
   echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
   echo ""
+  # Determine the user-facing URL
+  if [ -n "$CUSTOM_DOMAIN" ]; then
+    USER_URL="https://${CUSTOM_DOMAIN}"
+  elif [ -n "$PAGES_URL" ]; then
+    USER_URL="${PAGES_URL}"
+  else
+    USER_URL="${WORKER_URL}"
+  fi
+
   echo -e "  ${BOLD}Worker API:${NC}    ${WORKER_URL}"
   [ -n "$PAGES_URL" ] && echo -e "  ${BOLD}Web Vault:${NC}     ${PAGES_URL}"
-  [ -n "$PAGES_URL" ] && echo -e "  ${BOLD}Admin Panel:${NC}   ${PAGES_URL}/admin"
+  [ -n "$CUSTOM_DOMAIN" ] && echo -e "  ${BOLD}Custom URL:${NC}    https://${CUSTOM_DOMAIN}"
+  echo -e "  ${BOLD}Admin Panel:${NC}   ${USER_URL}/admin"
   echo ""
+
+  STEP=1
   echo -e "  ${BOLD}Next steps:${NC}"
   echo ""
-  if [ -n "$PAGES_URL" ]; then
-    echo -e "  1. Open ${BOLD}${PAGES_URL}${NC} in your browser"
-    echo -e "  2. Create an account and start using Bitwarden"
-    echo -e "  3. Configure clients to use: ${BOLD}${PAGES_URL}${NC}"
-  else
-    echo -e "  1. Configure Bitwarden clients to use: ${BOLD}${WORKER_URL}${NC}"
+
+  if [ -n "$CUSTOM_DOMAIN" ]; then
+    echo -e "  ${STEP}. ${BOLD}Set up DNS for ${CUSTOM_DOMAIN}:${NC}"
+    echo ""
+    echo -e "     For the ${BOLD}Worker API${NC} (Bitwarden clients connect here):"
+    echo -e "     In Cloudflare Dashboard > DNS > Add Record:"
+    echo -e "       Type: ${BOLD}AAAA${NC}  Name: ${BOLD}${CUSTOM_DOMAIN%%.*}${NC}  Content: ${BOLD}100::${NC}  Proxy: ${BOLD}ON${NC}"
+    echo -e "       (Cloudflare will route this to your Worker automatically)"
+    echo ""
+    if [ -n "$PAGES_URL" ]; then
+      PAGES_SUBDOMAIN="${PAGES_PROJECT}.pages.dev"
+      echo -e "     For the ${BOLD}Web Vault${NC} (browser access):"
+      echo -e "     Option A: Use Pages URL directly: ${PAGES_URL}"
+      echo -e "     Option B: Add custom domain to Pages project:"
+      echo -e "       npx wrangler pages project edit ${PAGES_PROJECT} --custom-domain ${CUSTOM_DOMAIN}"
+      echo ""
+    fi
+    STEP=$((STEP+1))
   fi
-  if [ -n "$ADMIN_TOKEN" ]; then
-    echo -e "  4. Admin panel: ${BOLD}${PAGES_URL:-$WORKER_URL}/admin${NC}"
+
+  if [ -n "$ADMIN_TOKEN" ] && [ "$SIGNUPS_ALLOWED" = "false" ]; then
+    echo -e "  ${STEP}. ${BOLD}Invite your family:${NC}"
+    echo -e "     Go to ${USER_URL}/admin → log in → Invite User"
+    echo -e "     Enter each family member's email address"
+    echo -e "     They can then register at ${USER_URL}"
+    STEP=$((STEP+1))
   fi
-  echo ""
-  echo -e "  ${BOLD}Custom domain:${NC}"
-  echo -e "  To use your own domain, add a CNAME in Cloudflare DNS"
-  echo -e "  and update DOMAIN in wrangler.toml, then redeploy."
+
+  echo -e "  ${STEP}. ${BOLD}Configure Bitwarden clients:${NC}"
+  echo -e "     In any Bitwarden client, tap the gear icon before logging in"
+  echo -e "     Set 'Self-hosted' server URL to: ${BOLD}${USER_URL}${NC}"
+  STEP=$((STEP+1))
+
+  if [ "$USE_CF_EMAIL" = true ]; then
+    EMAIL_DOMAIN="${MAIL_FROM#*@}"
+    echo ""
+    echo -e "  ${STEP}. ${BOLD}Verify Email Routing is working:${NC}"
+    echo -e "     Go to admin panel → Diagnostics → SMTP Test"
+    echo -e "     Enter your email and click Send Test Email"
+    echo -e "     If it fails, check: Dashboard > ${EMAIL_DOMAIN} > Email > Email Routing"
+    STEP=$((STEP+1))
+  fi
+
   echo ""
   echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
 }
