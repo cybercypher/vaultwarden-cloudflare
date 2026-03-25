@@ -1,4 +1,3 @@
-
 use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha1::Sha1;
@@ -72,7 +71,6 @@ fn base32_decode(data: &str) -> Option<Vec<u8>> {
     Some(result)
 }
 
-
 fn verify_totp(secret: &str, code: &str, time_step: u64) -> bool {
     // Allow 1 time step of drift in either direction
     let now = chrono::Utc::now().timestamp() as u64;
@@ -114,19 +112,26 @@ pub async fn get_twofactor(req: Request, env: &Env) -> Result<Response> {
 
     #[derive(serde::Deserialize)]
     #[allow(dead_code)]
-    struct TF { uuid: String, atype: i32, enabled: i32 }
+    struct TF {
+        uuid: String,
+        atype: i32,
+        enabled: i32,
+    }
 
-    let factors: Vec<TF> = db::query_all(
-        &d1,
-        "SELECT uuid, atype, enabled FROM twofactor WHERE user_uuid = ?1",
-        &[db::val(&claims.sub)],
-    ).await?;
+    let factors: Vec<TF> =
+        db::query_all(&d1, "SELECT uuid, atype, enabled FROM twofactor WHERE user_uuid = ?1", &[db::val(&claims.sub)])
+            .await?;
 
-    let factor_list: Vec<Value> = factors.iter().map(|f| json!({
-        "enabled": f.enabled != 0,
-        "type": f.atype,
-        "object": "twoFactorProvider",
-    })).collect();
+    let factor_list: Vec<Value> = factors
+        .iter()
+        .map(|f| {
+            json!({
+                "enabled": f.enabled != 0,
+                "type": f.atype,
+                "object": "twoFactorProvider",
+            })
+        })
+        .collect();
 
     let response = json!({
         "data": factor_list,
@@ -147,12 +152,16 @@ pub async fn get_authenticator(mut req: Request, env: &Env) -> Result<Response> 
 
     // Check if already has TOTP
     #[derive(serde::Deserialize)]
-    struct TF { data: String, enabled: i32 }
+    struct TF {
+        data: String,
+        enabled: i32,
+    }
     let existing: Option<TF> = db::query_one(
         &d1,
         "SELECT data, enabled FROM twofactor WHERE user_uuid = ?1 AND atype = ?2",
         &[db::val(&claims.sub), db::val_i32(TOTP_TYPE)],
-    ).await?;
+    )
+    .await?;
 
     let (key, enabled) = if let Some(tf) = existing {
         (tf.data, tf.enabled != 0)
@@ -194,19 +203,18 @@ pub async fn activate_authenticator(mut req: Request, env: &Env) -> Result<Respo
         &d1,
         "DELETE FROM twofactor WHERE user_uuid = ?1 AND atype = ?2",
         &[db::val(&claims.sub), db::val_i32(TOTP_TYPE)],
-    ).await?;
+    )
+    .await?;
     db::execute(
         &d1,
         "INSERT INTO twofactor (uuid, user_uuid, atype, enabled, data, last_used) VALUES (?1, ?2, ?3, 1, ?4, 0)",
         &[db::val(&tf_uuid), db::val(&claims.sub), db::val_i32(TOTP_TYPE), db::val(key)],
-    ).await?;
+    )
+    .await?;
 
     // Store recovery code on user
-    db::execute(
-        &d1,
-        "UPDATE users SET totp_recover = ?1 WHERE uuid = ?2",
-        &[db::val(&recover), db::val(&claims.sub)],
-    ).await?;
+    db::execute(&d1, "UPDATE users SET totp_recover = ?1 WHERE uuid = ?2", &[db::val(&recover), db::val(&claims.sub)])
+        .await?;
 
     let response = json!({
         "enabled": true,
@@ -231,7 +239,8 @@ pub async fn disable_twofactor(mut req: Request, env: &Env) -> Result<Response> 
         &d1,
         "DELETE FROM twofactor WHERE user_uuid = ?1 AND atype = ?2",
         &[db::val(&claims.sub), db::val_i32(tf_type)],
-    ).await?;
+    )
+    .await?;
 
     let response = json!({
         "enabled": false,
@@ -250,9 +259,7 @@ pub async fn get_recover(mut req: Request, env: &Env) -> Result<Response> {
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
     verify_password_from_body(&body, &claims.sub, &d1).await?;
 
-    let user = User::find_by_uuid(&claims.sub, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let user = User::find_by_uuid(&claims.sub, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     let response = json!({
         "code": user.totp_recover,
@@ -271,16 +278,18 @@ pub async fn get_email(mut req: Request, env: &Env) -> Result<Response> {
     verify_password_from_body(&body, &claims.sub, &d1).await?;
 
     #[derive(serde::Deserialize)]
-    struct TF { data: String, enabled: i32 }
+    struct TF {
+        data: String,
+        enabled: i32,
+    }
     let existing: Option<TF> = db::query_one(
         &d1,
         "SELECT data, enabled FROM twofactor WHERE user_uuid = ?1 AND atype = ?2",
         &[db::val(&claims.sub), db::val_i32(EMAIL_TYPE)],
-    ).await?;
+    )
+    .await?;
 
-    let user = User::find_by_uuid(&claims.sub, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let user = User::find_by_uuid(&claims.sub, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     let (email, enabled) = if let Some(tf) = existing {
         (tf.data, tf.enabled != 0)
@@ -326,12 +335,14 @@ pub async fn activate_email(mut req: Request, env: &Env) -> Result<Response> {
         &d1,
         "DELETE FROM twofactor WHERE user_uuid = ?1 AND atype = ?2",
         &[db::val(&claims.sub), db::val_i32(EMAIL_TYPE)],
-    ).await?;
+    )
+    .await?;
     db::execute(
         &d1,
         "INSERT INTO twofactor (uuid, user_uuid, atype, enabled, data, last_used) VALUES (?1, ?2, ?3, 1, ?4, 0)",
         &[db::val(&tf_uuid), db::val(&claims.sub), db::val_i32(EMAIL_TYPE), db::val(email)],
-    ).await?;
+    )
+    .await?;
 
     let response = json!({
         "email": email,
@@ -348,18 +359,19 @@ pub async fn send_email_login(mut req: Request, env: &Env) -> Result<Response> {
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
     let email = body["email"].as_str().ok_or_else(|| Error::bad_request("email required"))?;
 
-    let user = User::find_by_email(email, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let user = User::find_by_email(email, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     // Check if email 2FA is enabled
     #[derive(serde::Deserialize)]
-    struct TF { data: String }
+    struct TF {
+        data: String,
+    }
     let tf: Option<TF> = db::query_one(
         &d1,
         "SELECT data FROM twofactor WHERE user_uuid = ?1 AND atype = ?2 AND enabled = 1",
         &[db::val(&user.uuid), db::val_i32(EMAIL_TYPE)],
-    ).await?;
+    )
+    .await?;
 
     if let Some(tf) = tf {
         let token = crypto::get_random_string_alphanum(6).to_uppercase();
@@ -431,12 +443,16 @@ pub async fn verify_2fa(
 ) -> Result<bool> {
     // Check if user has any 2FA enabled
     #[derive(serde::Deserialize)]
-    struct TF { atype: i32, data: String }
+    struct TF {
+        atype: i32,
+        data: String,
+    }
     let factors: Vec<TF> = db::query_all(
         d1,
         "SELECT atype, data FROM twofactor WHERE user_uuid = ?1 AND enabled = 1",
         &[db::val(user_uuid)],
-    ).await?;
+    )
+    .await?;
 
     if factors.is_empty() {
         return Ok(true); // No 2FA enabled
@@ -447,20 +463,26 @@ pub async fn verify_2fa(
         if !remember.is_empty() {
             // Verify remember token JWT
             let domain = env.var("DOMAIN").map(|v| v.to_string()).unwrap_or_default();
-            if auth::decode_jwt::<auth::TwoFactorRememberClaims>(remember, &format!("{domain}|2faremember"), env).is_ok() {
+            if auth::decode_jwt::<auth::TwoFactorRememberClaims>(remember, &format!("{domain}|2faremember"), env)
+                .is_ok()
+            {
                 return Ok(true);
             }
         }
     }
 
     let token = two_factor_token.ok_or_else(|| {
-        Error::new(json!({
-            "error": "invalid_grant",
-            "error_description": "Two factor required.",
-            "TwoFactorProviders": factors.iter().map(|f| f.atype).collect::<Vec<_>>(),
-            "TwoFactorProviders2": {},
-            "MasterPasswordPolicy": {},
-        }).to_string(), 400)
+        Error::new(
+            json!({
+                "error": "invalid_grant",
+                "error_description": "Two factor required.",
+                "TwoFactorProviders": factors.iter().map(|f| f.atype).collect::<Vec<_>>(),
+                "TwoFactorProviders2": {},
+                "MasterPasswordPolicy": {},
+            })
+            .to_string(),
+            400,
+        )
     })?;
 
     let provider = two_factor_provider.unwrap_or(0);
@@ -477,7 +499,8 @@ pub async fn verify_2fa(
                         d1,
                         "UPDATE twofactor SET last_used = ?1 WHERE user_uuid = ?2 AND atype = ?3",
                         &[db::val_i64(now), db::val(user_uuid), db::val_i32(TOTP_TYPE)],
-                    ).await;
+                    )
+                    .await;
                     return Ok(true);
                 }
             }
@@ -509,17 +532,9 @@ pub async fn verify_2fa(
 // Helpers
 // ============================================================================
 
-async fn verify_password_from_body(
-    body: &Value,
-    user_uuid: &str,
-    d1: &worker::D1Database,
-) -> Result<()> {
-    let hash = body["masterPasswordHash"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("masterPasswordHash required"))?;
-    let user = User::find_by_uuid(user_uuid, d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+async fn verify_password_from_body(body: &Value, user_uuid: &str, d1: &worker::D1Database) -> Result<()> {
+    let hash = body["masterPasswordHash"].as_str().ok_or_else(|| Error::bad_request("masterPasswordHash required"))?;
+    let user = User::find_by_uuid(user_uuid, d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
     if !user.check_valid_password(hash) {
         return Err(Error::bad_request("Invalid password"));
     }

@@ -40,9 +40,8 @@ impl Error {
                 "Object": "error"
             }
         });
-        let mut resp = Response::from_json(&body).unwrap_or_else(|_| {
-            Response::error(&self.message, self.status).unwrap()
-        });
+        let mut resp =
+            Response::from_json(&body).unwrap_or_else(|_| Response::error(&self.message, self.status).unwrap());
         let _ = resp.headers_mut().set("Content-Type", "application/json");
         resp.with_status(self.status)
     }

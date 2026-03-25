@@ -131,12 +131,7 @@ impl Organization {
 
 impl Membership {
     pub async fn find_by_user(user_uuid: &str, d1: &D1Database) -> Result<Vec<Membership>> {
-        db::query_all(
-            d1,
-            "SELECT * FROM users_organizations WHERE user_uuid = ?1",
-            &[db::val(user_uuid)],
-        )
-        .await
+        db::query_all(d1, "SELECT * FROM users_organizations WHERE user_uuid = ?1", &[db::val(user_uuid)]).await
     }
 
     pub async fn find_confirmed_by_user(user_uuid: &str, d1: &D1Database) -> Result<Vec<Membership>> {

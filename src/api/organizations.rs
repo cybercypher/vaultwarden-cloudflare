@@ -6,8 +6,7 @@ use crate::db;
 use crate::error::{Error, Result};
 use crate::models::collection::Collection;
 use crate::models::organization::{
-    Membership, Organization, MEMBERSHIP_CONFIRMED, MEMBERSHIP_INVITED, MEMBERSHIP_OWNER,
-    MEMBERSHIP_USER,
+    Membership, Organization, MEMBERSHIP_CONFIRMED, MEMBERSHIP_INVITED, MEMBERSHIP_OWNER, MEMBERSHIP_USER,
 };
 use crate::util;
 
@@ -19,9 +18,7 @@ pub async fn create(mut req: Request, env: &Env) -> Result<Response> {
 
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
     let name = body["name"].as_str().ok_or_else(|| Error::bad_request("name required"))?;
-    let billing_email = body["billingEmail"]
-        .as_str()
-        .unwrap_or(&claims.email);
+    let billing_email = body["billingEmail"].as_str().unwrap_or(&claims.email);
 
     let org = Organization::new(name.to_string(), billing_email.to_string());
 
@@ -77,9 +74,8 @@ pub async fn get_org(req: Request, env: &Env, org_id: &str) -> Result<Response> 
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let org = Organization::find_by_uuid(org_id, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("Organization not found"))?;
+    let org =
+        Organization::find_by_uuid(org_id, &d1).await?.ok_or_else(|| Error::not_found("Organization not found"))?;
     let membership = require_membership(&claims.sub, org_id, &d1).await?;
 
     Response::from_json(&org.to_json(&membership)).map_err(|e| Error::internal(e.to_string()))
@@ -98,9 +94,8 @@ pub async fn delete_org(mut req: Request, env: &Env, org_id: &str) -> Result<Res
 
     // Verify password (mandatory)
     let body: Value = req.json().await.unwrap_or(json!({}));
-    let hash = body["masterPasswordHash"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
+    let hash =
+        body["masterPasswordHash"].as_str().ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
     {
         let user = crate::models::User::find_by_uuid(&claims.sub, &d1)
             .await?
@@ -111,11 +106,31 @@ pub async fn delete_org(mut req: Request, env: &Env, org_id: &str) -> Result<Res
     }
 
     // Delete all org data
-    db::execute(&d1, "DELETE FROM ciphers_collections WHERE collection_uuid IN (SELECT uuid FROM collections WHERE org_uuid = ?1)", &[db::val(org_id)]).await?;
-    db::execute(&d1, "DELETE FROM users_collections WHERE collection_uuid IN (SELECT uuid FROM collections WHERE org_uuid = ?1)", &[db::val(org_id)]).await?;
-    db::execute(&d1, "DELETE FROM collections_groups WHERE collections_uuid IN (SELECT uuid FROM collections WHERE org_uuid = ?1)", &[db::val(org_id)]).await?;
+    db::execute(
+        &d1,
+        "DELETE FROM ciphers_collections WHERE collection_uuid IN (SELECT uuid FROM collections WHERE org_uuid = ?1)",
+        &[db::val(org_id)],
+    )
+    .await?;
+    db::execute(
+        &d1,
+        "DELETE FROM users_collections WHERE collection_uuid IN (SELECT uuid FROM collections WHERE org_uuid = ?1)",
+        &[db::val(org_id)],
+    )
+    .await?;
+    db::execute(
+        &d1,
+        "DELETE FROM collections_groups WHERE collections_uuid IN (SELECT uuid FROM collections WHERE org_uuid = ?1)",
+        &[db::val(org_id)],
+    )
+    .await?;
     db::execute(&d1, "DELETE FROM collections WHERE org_uuid = ?1", &[db::val(org_id)]).await?;
-    db::execute(&d1, "DELETE FROM groups_users WHERE groups_uuid IN (SELECT uuid FROM groups WHERE organizations_uuid = ?1)", &[db::val(org_id)]).await?;
+    db::execute(
+        &d1,
+        "DELETE FROM groups_users WHERE groups_uuid IN (SELECT uuid FROM groups WHERE organizations_uuid = ?1)",
+        &[db::val(org_id)],
+    )
+    .await?;
     db::execute(&d1, "DELETE FROM groups WHERE organizations_uuid = ?1", &[db::val(org_id)]).await?;
     db::execute(&d1, "DELETE FROM org_policies WHERE org_uuid = ?1", &[db::val(org_id)]).await?;
     db::execute(&d1, "DELETE FROM ciphers WHERE organization_uuid = ?1", &[db::val(org_id)]).await?;
@@ -140,17 +155,14 @@ pub async fn leave(req: Request, env: &Env, org_id: &str) -> Result<Response> {
             &d1,
             "SELECT * FROM users_organizations WHERE org_uuid = ?1 AND atype = 0 AND status = 2",
             &[db::val(org_id)],
-        ).await?;
+        )
+        .await?;
         if owners.len() <= 1 {
             return Err(Error::bad_request("Cannot leave as the only owner"));
         }
     }
 
-    db::execute(
-        &d1,
-        "DELETE FROM users_organizations WHERE uuid = ?1",
-        &[db::val(&membership.uuid)],
-    ).await?;
+    db::execute(&d1, "DELETE FROM users_organizations WHERE uuid = ?1", &[db::val(&membership.uuid)]).await?;
 
     Response::ok("").map_err(|e| Error::internal(e.to_string()))
 }
@@ -163,11 +175,8 @@ pub async fn get_members(req: Request, env: &Env, org_id: &str) -> Result<Respon
 
     let _membership = require_membership(&claims.sub, org_id, &d1).await?;
 
-    let members: Vec<Membership> = db::query_all(
-        &d1,
-        "SELECT * FROM users_organizations WHERE org_uuid = ?1",
-        &[db::val(org_id)],
-    ).await?;
+    let members: Vec<Membership> =
+        db::query_all(&d1, "SELECT * FROM users_organizations WHERE org_uuid = ?1", &[db::val(org_id)]).await?;
 
     let mut member_list = Vec::new();
     for m in &members {
@@ -217,7 +226,9 @@ pub async fn invite_member(mut req: Request, env: &Env, org_id: &str) -> Result<
 
     for email_val in emails {
         let email = email_val.as_str().unwrap_or("").to_lowercase();
-        if email.is_empty() { continue; }
+        if email.is_empty() {
+            continue;
+        }
 
         // Check if already a member
         let existing: Option<Membership> = db::query_one(
@@ -226,7 +237,9 @@ pub async fn invite_member(mut req: Request, env: &Env, org_id: &str) -> Result<
             &[db::val(org_id), db::val(&email)],
         ).await?;
 
-        if existing.is_some() { continue; }
+        if existing.is_some() {
+            continue;
+        }
 
         // Find user or create invitation
         let user = crate::models::User::find_by_email(&email, &d1).await?;
@@ -245,7 +258,11 @@ pub async fn invite_member(mut req: Request, env: &Env, org_id: &str) -> Result<
             user_uuid,
             org_uuid: org_id.to_string(),
             invited_by_email: Some(claims.email.clone()),
-            access_all: if access_all { 1 } else { 0 },
+            access_all: if access_all {
+                1
+            } else {
+                0
+            },
             akey: String::new(),
             status: MEMBERSHIP_INVITED,
             atype,
@@ -257,9 +274,7 @@ pub async fn invite_member(mut req: Request, env: &Env, org_id: &str) -> Result<
         // Send invite email
         let org = Organization::find_by_uuid(org_id, &d1).await?;
         let org_name = org.map(|o| o.name).unwrap_or_else(|| "Organization".to_string());
-        let _ = crate::mail::send_org_invite(
-            env, &email, &org_name, &claims.email, "", org_id, &membership.uuid,
-        ).await;
+        let _ = crate::mail::send_org_invite(env, &email, &org_name, &claims.email, "", org_id, &membership.uuid).await;
     }
 
     Response::ok("").map_err(|e| Error::internal(e.to_string()))
@@ -283,7 +298,8 @@ pub async fn confirm_member(mut req: Request, env: &Env, org_id: &str, member_id
         &d1,
         "UPDATE users_organizations SET status = ?1, akey = ?2 WHERE uuid = ?3 AND org_uuid = ?4",
         &[db::val_i32(MEMBERSHIP_CONFIRMED), db::val(key), db::val(member_id), db::val(org_id)],
-    ).await?;
+    )
+    .await?;
 
     Response::ok("").map_err(|e| Error::internal(e.to_string()))
 }
@@ -303,7 +319,8 @@ pub async fn delete_member(req: Request, env: &Env, org_id: &str, member_id: &st
         &d1,
         "DELETE FROM users_organizations WHERE uuid = ?1 AND org_uuid = ?2",
         &[db::val(member_id), db::val(org_id)],
-    ).await?;
+    )
+    .await?;
 
     Response::ok("").map_err(|e| Error::internal(e.to_string()))
 }
@@ -316,11 +333,8 @@ pub async fn get_collections(req: Request, env: &Env, org_id: &str) -> Result<Re
 
     let _membership = require_membership(&claims.sub, org_id, &d1).await?;
 
-    let collections: Vec<Collection> = db::query_all(
-        &d1,
-        "SELECT * FROM collections WHERE org_uuid = ?1",
-        &[db::val(org_id)],
-    ).await?;
+    let collections: Vec<Collection> =
+        db::query_all(&d1, "SELECT * FROM collections WHERE org_uuid = ?1", &[db::val(org_id)]).await?;
 
     let col_list: Vec<Value> = collections.iter().map(|c| c.to_json()).collect();
 
@@ -357,7 +371,8 @@ pub async fn create_collection(mut req: Request, env: &Env, org_id: &str) -> Res
         &d1,
         "INSERT INTO collections (uuid, org_uuid, name, external_id) VALUES (?1, ?2, ?3, ?4)",
         &[db::val(&col.uuid), db::val(&col.org_uuid), db::val(&col.name), db::val_opt(&col.external_id)],
-    ).await?;
+    )
+    .await?;
 
     Response::from_json(&col.to_json()).map_err(|e| Error::internal(e.to_string()))
 }
@@ -376,7 +391,8 @@ pub async fn delete_collection(req: Request, env: &Env, org_id: &str, col_id: &s
     db::execute(&d1, "DELETE FROM ciphers_collections WHERE collection_uuid = ?1", &[db::val(col_id)]).await?;
     db::execute(&d1, "DELETE FROM users_collections WHERE collection_uuid = ?1", &[db::val(col_id)]).await?;
     db::execute(&d1, "DELETE FROM collections_groups WHERE collections_uuid = ?1", &[db::val(col_id)]).await?;
-    db::execute(&d1, "DELETE FROM collections WHERE uuid = ?1 AND org_uuid = ?2", &[db::val(col_id), db::val(org_id)]).await?;
+    db::execute(&d1, "DELETE FROM collections WHERE uuid = ?1 AND org_uuid = ?2", &[db::val(col_id), db::val(org_id)])
+        .await?;
 
     Response::ok("").map_err(|e| Error::internal(e.to_string()))
 }
@@ -388,9 +404,8 @@ pub async fn get_org_keys(req: Request, env: &Env, org_id: &str) -> Result<Respo
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
     let _membership = require_membership(&claims.sub, org_id, &d1).await?;
-    let org = Organization::find_by_uuid(org_id, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("Organization not found"))?;
+    let org =
+        Organization::find_by_uuid(org_id, &d1).await?.ok_or_else(|| Error::not_found("Organization not found"))?;
 
     let response = json!({
         "publicKey": org.public_key,
@@ -424,7 +439,8 @@ pub async fn accept_invite(mut req: Request, env: &Env, org_id: &str, member_id:
         &d1,
         "UPDATE users_organizations SET status = ?1 WHERE uuid = ?2 AND org_uuid = ?3 AND status = ?4",
         &[db::val_i32(1), db::val(member_id), db::val(org_id), db::val_i32(MEMBERSHIP_INVITED)],
-    ).await?;
+    )
+    .await?;
 
     Response::ok("").map_err(|e| Error::internal(e.to_string()))
 }
@@ -433,16 +449,13 @@ pub async fn accept_invite(mut req: Request, env: &Env, org_id: &str, member_id:
 // Helpers
 // ============================================================================
 
-async fn require_membership(
-    user_uuid: &str,
-    org_uuid: &str,
-    d1: &worker::D1Database,
-) -> Result<Membership> {
+async fn require_membership(user_uuid: &str, org_uuid: &str, d1: &worker::D1Database) -> Result<Membership> {
     let membership: Option<Membership> = db::query_one(
         d1,
         "SELECT * FROM users_organizations WHERE user_uuid = ?1 AND org_uuid = ?2",
         &[db::val(user_uuid), db::val(org_uuid)],
-    ).await?;
+    )
+    .await?;
 
     membership.ok_or_else(|| Error::not_found("Not a member of this organization"))
 }

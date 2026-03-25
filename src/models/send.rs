@@ -54,12 +54,7 @@ impl Send {
     }
 
     pub async fn find_by_user(user_uuid: &str, d1: &D1Database) -> Result<Vec<Send>> {
-        db::query_all(
-            d1,
-            "SELECT * FROM sends WHERE user_uuid = ?1",
-            &[db::val(user_uuid)],
-        )
-        .await
+        db::query_all(d1, "SELECT * FROM sends WHERE user_uuid = ?1", &[db::val(user_uuid)]).await
     }
 
     pub async fn save(&self, d1: &D1Database) -> Result<()> {

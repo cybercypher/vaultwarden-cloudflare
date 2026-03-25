@@ -61,12 +61,9 @@ impl Collection {
 
 impl CollectionCipher {
     pub async fn find_collections_for_cipher(cipher_uuid: &str, d1: &D1Database) -> Result<Vec<String>> {
-        let results: Vec<CollectionCipher> = db::query_all(
-            d1,
-            "SELECT * FROM ciphers_collections WHERE cipher_uuid = ?1",
-            &[db::val(cipher_uuid)],
-        )
-        .await?;
+        let results: Vec<CollectionCipher> =
+            db::query_all(d1, "SELECT * FROM ciphers_collections WHERE cipher_uuid = ?1", &[db::val(cipher_uuid)])
+                .await?;
         Ok(results.into_iter().map(|cc| cc.collection_uuid).collect())
     }
 }

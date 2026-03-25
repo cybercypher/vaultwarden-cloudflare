@@ -17,7 +17,6 @@ pub fn verify_password_hash(secret: &[u8], salt: &[u8], previous: &[u8], iterati
     ct_eq(&result, previous)
 }
 
-
 /// Return an array holding `N` random bytes.
 pub fn get_random_bytes<const N: usize>() -> [u8; N] {
     let mut array = [0u8; N];

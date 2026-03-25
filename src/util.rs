@@ -24,7 +24,7 @@ pub fn now_utc() -> String {
 /// Parse a date string to NaiveDateTime.
 pub fn parse_date(s: &str) -> Option<NaiveDateTime> {
     let s = s.trim_end_matches('Z');
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f").ok()
+    NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
+        .ok()
         .or_else(|| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").ok())
 }
-

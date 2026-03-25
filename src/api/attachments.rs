@@ -14,9 +14,7 @@ pub async fn create_v2(mut req: Request, env: &Env, cipher_id: &str) -> Result<R
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let cipher = Cipher::find_by_uuid(cipher_id, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("Cipher not found"))?;
+    let cipher = Cipher::find_by_uuid(cipher_id, &d1).await?.ok_or_else(|| Error::not_found("Cipher not found"))?;
 
     if !cipher.is_accessible_to_user(&claims.sub, &d1).await? {
         return Err(Error::not_found("Cipher not found"));
@@ -40,14 +38,16 @@ pub async fn create_v2(mut req: Request, env: &Env, cipher_id: &str) -> Result<R
             db::val_i64(file_size),
             db::val_opt(&key.map(|s| s.to_string())),
         ],
-    ).await?;
+    )
+    .await?;
 
     // Update cipher revision
     db::execute(
         &d1,
         "UPDATE ciphers SET updated_at = ?1 WHERE uuid = ?2",
         &[db::val(&util::now_utc()), db::val(cipher_id)],
-    ).await?;
+    )
+    .await?;
 
     let att_json = json!({
         "id": att_id,
@@ -76,9 +76,7 @@ pub async fn upload(mut req: Request, env: &Env, cipher_id: &str, att_id: &str) 
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let cipher = Cipher::find_by_uuid(cipher_id, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("Cipher not found"))?;
+    let cipher = Cipher::find_by_uuid(cipher_id, &d1).await?.ok_or_else(|| Error::not_found("Cipher not found"))?;
 
     if !cipher.is_accessible_to_user(&claims.sub, &d1).await? {
         return Err(Error::not_found("Cipher not found"));
@@ -90,17 +88,11 @@ pub async fn upload(mut req: Request, env: &Env, cipher_id: &str, att_id: &str) 
     let file_size = file_data.len() as i64;
     let r2_key = format!("attachments/{}/{}", cipher_id, att_id);
 
-    r2.put(&r2_key, file_data)
-        .execute()
-        .await
-        .map_err(|e| Error::internal(format!("R2 upload failed: {e}")))?;
+    r2.put(&r2_key, file_data).execute().await.map_err(|e| Error::internal(format!("R2 upload failed: {e}")))?;
 
     // Update file size
-    db::execute(
-        &d1,
-        "UPDATE attachments SET file_size = ?1 WHERE id = ?2",
-        &[db::val_i64(file_size), db::val(att_id)],
-    ).await?;
+    db::execute(&d1, "UPDATE attachments SET file_size = ?1 WHERE id = ?2", &[db::val_i64(file_size), db::val(att_id)])
+        .await?;
 
     Response::ok("").map_err(|e| Error::internal(e.to_string()))
 }
@@ -111,21 +103,25 @@ pub async fn get(req: Request, env: &Env, cipher_id: &str, att_id: &str) -> Resu
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let cipher = Cipher::find_by_uuid(cipher_id, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("Cipher not found"))?;
+    let cipher = Cipher::find_by_uuid(cipher_id, &d1).await?.ok_or_else(|| Error::not_found("Cipher not found"))?;
 
     if !cipher.is_accessible_to_user(&claims.sub, &d1).await? {
         return Err(Error::not_found("Cipher not found"));
     }
 
     #[derive(serde::Deserialize)]
-    struct Att { id: String, file_name: String, file_size: i64, akey: Option<String> }
+    struct Att {
+        id: String,
+        file_name: String,
+        file_size: i64,
+        akey: Option<String>,
+    }
     let att: Option<Att> = db::query_one(
         &d1,
         "SELECT * FROM attachments WHERE id = ?1 AND cipher_uuid = ?2",
         &[db::val(att_id), db::val(cipher_id)],
-    ).await?;
+    )
+    .await?;
     let att = att.ok_or_else(|| Error::not_found("Attachment not found"))?;
 
     let response = json!({
@@ -147,9 +143,7 @@ pub async fn delete(req: Request, env: &Env, cipher_id: &str, att_id: &str) -> R
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let cipher = Cipher::find_by_uuid(cipher_id, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("Cipher not found"))?;
+    let cipher = Cipher::find_by_uuid(cipher_id, &d1).await?.ok_or_else(|| Error::not_found("Cipher not found"))?;
 
     if !cipher.is_accessible_to_user(&claims.sub, &d1).await? {
         return Err(Error::not_found("Cipher not found"));
@@ -165,14 +159,16 @@ pub async fn delete(req: Request, env: &Env, cipher_id: &str, att_id: &str) -> R
         &d1,
         "DELETE FROM attachments WHERE id = ?1 AND cipher_uuid = ?2",
         &[db::val(att_id), db::val(cipher_id)],
-    ).await?;
+    )
+    .await?;
 
     // Update cipher revision
     db::execute(
         &d1,
         "UPDATE ciphers SET updated_at = ?1 WHERE uuid = ?2",
         &[db::val(&util::now_utc()), db::val(cipher_id)],
-    ).await?;
+    )
+    .await?;
 
     Response::ok("").map_err(|e| Error::internal(e.to_string()))
 }

@@ -32,9 +32,7 @@ pub async fn get(req: Request, env: &Env, send_id: &str) -> Result<Response> {
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let send = Send::find_by_uuid(send_id, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("Send not found"))?;
+    let send = Send::find_by_uuid(send_id, &d1).await?.ok_or_else(|| Error::not_found("Send not found"))?;
 
     if send.user_uuid.as_deref() != Some(&claims.sub) {
         return Err(Error::not_found("Send not found"));
@@ -82,9 +80,7 @@ pub async fn upload_file(mut req: Request, env: &Env, send_id: &str, file_id: &s
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let send = Send::find_by_uuid(send_id, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("Send not found"))?;
+    let send = Send::find_by_uuid(send_id, &d1).await?.ok_or_else(|| Error::not_found("Send not found"))?;
 
     if send.user_uuid.as_deref() != Some(&claims.sub) {
         return Err(Error::not_found("Send not found"));
@@ -95,10 +91,7 @@ pub async fn upload_file(mut req: Request, env: &Env, send_id: &str, file_id: &s
     let file_data = req.bytes().await.map_err(|e| Error::bad_request(e.to_string()))?;
     let r2_key = format!("sends/{}/{}", send_id, file_id);
 
-    r2.put(&r2_key, file_data)
-        .execute()
-        .await
-        .map_err(|e| Error::internal(format!("R2 upload failed: {e}")))?;
+    r2.put(&r2_key, file_data).execute().await.map_err(|e| Error::internal(format!("R2 upload failed: {e}")))?;
 
     // Update send data with file info
     let mut data: Value = serde_json::from_str(&send.data).unwrap_or(json!({}));
@@ -110,7 +103,8 @@ pub async fn upload_file(mut req: Request, env: &Env, send_id: &str, file_id: &s
         &d1,
         "UPDATE sends SET data = ?1, revision_date = ?2 WHERE uuid = ?3",
         &[db::val(&data.to_string()), db::val(&util::now_utc()), db::val(send_id)],
-    ).await?;
+    )
+    .await?;
 
     Response::ok("").map_err(|e| Error::internal(e.to_string()))
 }
@@ -121,9 +115,7 @@ pub async fn update(mut req: Request, env: &Env, send_id: &str) -> Result<Respon
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let mut send = Send::find_by_uuid(send_id, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("Send not found"))?;
+    let mut send = Send::find_by_uuid(send_id, &d1).await?.ok_or_else(|| Error::not_found("Send not found"))?;
 
     if send.user_uuid.as_deref() != Some(&claims.sub) {
         return Err(Error::not_found("Send not found"));
@@ -143,9 +135,7 @@ pub async fn delete(req: Request, env: &Env, send_id: &str) -> Result<Response> 
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let send = Send::find_by_uuid(send_id, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("Send not found"))?;
+    let send = Send::find_by_uuid(send_id, &d1).await?.ok_or_else(|| Error::not_found("Send not found"))?;
 
     if send.user_uuid.as_deref() != Some(&claims.sub) {
         return Err(Error::not_found("Send not found"));
@@ -168,9 +158,7 @@ pub async fn remove_password(req: Request, env: &Env, send_id: &str) -> Result<R
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let mut send = Send::find_by_uuid(send_id, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("Send not found"))?;
+    let mut send = Send::find_by_uuid(send_id, &d1).await?.ok_or_else(|| Error::not_found("Send not found"))?;
 
     if send.user_uuid.as_deref() != Some(&claims.sub) {
         return Err(Error::not_found("Send not found"));
@@ -223,32 +211,20 @@ pub async fn access(mut req: Request, env: &Env, access_id: &str) -> Result<Resp
     // Check password
     let body: Value = req.json().await.unwrap_or(json!({}));
     if send.password_hash.is_some() {
-        let password = body["password"]
-            .as_str()
-            .ok_or_else(|| Error::bad_request("Password required for this Send"))?;
+        let password =
+            body["password"].as_str().ok_or_else(|| Error::bad_request("Password required for this Send"))?;
 
-        if let (Some(hash), Some(salt), Some(iter)) =
-            (&send.password_hash, &send.password_salt, send.password_iter)
-        {
+        if let (Some(hash), Some(salt), Some(iter)) = (&send.password_hash, &send.password_salt, send.password_iter) {
             let stored_hash = STANDARD.decode(hash).unwrap_or_default();
             let stored_salt = STANDARD.decode(salt).unwrap_or_default();
-            if !crypto::verify_password_hash(
-                password.as_bytes(),
-                &stored_salt,
-                &stored_hash,
-                iter as u32,
-            ) {
+            if !crypto::verify_password_hash(password.as_bytes(), &stored_salt, &stored_hash, iter as u32) {
                 return Err(Error::unauthorized("Invalid password"));
             }
         }
     }
 
     // Increment access count
-    db::execute(
-        &d1,
-        "UPDATE sends SET access_count = access_count + 1 WHERE uuid = ?1",
-        &[db::val(access_id)],
-    ).await?;
+    db::execute(&d1, "UPDATE sends SET access_count = access_count + 1 WHERE uuid = ?1", &[db::val(access_id)]).await?;
 
     let data: Value = serde_json::from_str(&send.data).unwrap_or(Value::Null);
     let response = json!({
@@ -280,12 +256,8 @@ pub async fn access_file(mut req: Request, env: &Env, send_id: &str, file_id: &s
     // Check password
     let body: Value = req.json().await.unwrap_or(json!({}));
     if send.password_hash.is_some() {
-        let password = body["password"]
-            .as_str()
-            .ok_or_else(|| Error::bad_request("Password required"))?;
-        if let (Some(hash), Some(salt), Some(iter)) =
-            (&send.password_hash, &send.password_salt, send.password_iter)
-        {
+        let password = body["password"].as_str().ok_or_else(|| Error::bad_request("Password required"))?;
+        if let (Some(hash), Some(salt), Some(iter)) = (&send.password_hash, &send.password_salt, send.password_iter) {
             let stored_hash = STANDARD.decode(hash).unwrap_or_default();
             let stored_salt = STANDARD.decode(salt).unwrap_or_default();
             if !crypto::verify_password_hash(password.as_bytes(), &stored_salt, &stored_hash, iter as u32) {
@@ -361,9 +333,7 @@ async fn create_send_from_data(user_uuid: &str, data: &Value, d1: &worker::D1Dat
     let atype = data["type"].as_i64().ok_or_else(|| Error::bad_request("type required"))? as i32;
     let name = data["name"].as_str().ok_or_else(|| Error::bad_request("name required"))?;
     let key = data["key"].as_str().ok_or_else(|| Error::bad_request("key required"))?;
-    let deletion_date = data["deletionDate"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("deletionDate required"))?;
+    let deletion_date = data["deletionDate"].as_str().ok_or_else(|| Error::bad_request("deletionDate required"))?;
 
     let type_data = match atype {
         0 => data.get("text").map(|d| d.to_string()).unwrap_or_else(|| "{}".to_string()),
@@ -390,8 +360,18 @@ async fn create_send_from_data(user_uuid: &str, data: &Value, d1: &worker::D1Dat
         revision_date: now,
         expiration_date: data["expirationDate"].as_str().map(|s| s.to_string()),
         deletion_date: deletion_date.to_string(),
-        disabled: if data["disabled"].as_bool().unwrap_or(false) { 1 } else { 0 },
-        hide_email: data["hideEmail"].as_bool().map(|b| if b { 1 } else { 0 }),
+        disabled: if data["disabled"].as_bool().unwrap_or(false) {
+            1
+        } else {
+            0
+        },
+        hide_email: data["hideEmail"].as_bool().map(|b| {
+            if b {
+                1
+            } else {
+                0
+            }
+        }),
     };
 
     // Set password if provided
@@ -415,8 +395,18 @@ fn update_send_from_data(send: &mut Send, data: &Value) -> Result<()> {
     if let Some(del) = data["deletionDate"].as_str() {
         send.deletion_date = del.to_string();
     }
-    send.disabled = if data["disabled"].as_bool().unwrap_or(false) { 1 } else { 0 };
-    send.hide_email = data["hideEmail"].as_bool().map(|b| if b { 1 } else { 0 });
+    send.disabled = if data["disabled"].as_bool().unwrap_or(false) {
+        1
+    } else {
+        0
+    };
+    send.hide_email = data["hideEmail"].as_bool().map(|b| {
+        if b {
+            1
+        } else {
+            0
+        }
+    });
 
     if let Some(pw) = data["password"].as_str() {
         if !pw.is_empty() {

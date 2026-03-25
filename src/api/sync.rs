@@ -12,9 +12,7 @@ pub async fn sync(req: Request, env: &Env) -> Result<Response> {
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let user = User::find_by_uuid(&claims.sub, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let user = User::find_by_uuid(&claims.sub, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     // Fetch all user data in parallel (D1 is sequential per-request, but still structured)
     let folders = Folder::find_by_user(&user.uuid, &d1).await?;
@@ -39,9 +37,7 @@ pub async fn sync(req: Request, env: &Env) -> Result<Response> {
         let collection_ids = CollectionCipher::find_collections_for_cipher(&cipher.uuid, &d1).await?;
 
         let mut cipher_json = cipher.to_json(folder_id.as_deref(), favorite, &[]);
-        cipher_json["collectionIds"] = Value::Array(
-            collection_ids.into_iter().map(Value::String).collect(),
-        );
+        cipher_json["collectionIds"] = Value::Array(collection_ids.into_iter().map(Value::String).collect());
         cipher_list.push(cipher_json);
     }
 
@@ -73,7 +69,5 @@ pub async fn sync(req: Request, env: &Env) -> Result<Response> {
 }
 
 fn get_domain(env: &Env) -> String {
-    env.var("DOMAIN")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| "https://vaultwarden.example.com".to_string())
+    env.var("DOMAIN").map(|v| v.to_string()).unwrap_or_else(|_| "https://vaultwarden.example.com".to_string())
 }

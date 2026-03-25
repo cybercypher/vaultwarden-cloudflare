@@ -11,9 +11,7 @@ pub async fn profile(req: Request, env: &Env) -> Result<Response> {
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let user = User::find_by_uuid(&claims.sub, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let user = User::find_by_uuid(&claims.sub, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     // Get organizations
     let memberships = crate::models::Membership::find_confirmed_by_user(&user.uuid, &d1).await?;
@@ -38,9 +36,7 @@ pub async fn put_profile(mut req: Request, env: &Env) -> Result<Response> {
 
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
 
-    let mut user = User::find_by_uuid(&claims.sub, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let mut user = User::find_by_uuid(&claims.sub, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     if let Some(name) = body["name"].as_str() {
         user.name = name.to_string();
@@ -61,9 +57,7 @@ pub async fn post_keys(mut req: Request, env: &Env) -> Result<Response> {
 
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
 
-    let mut user = User::find_by_uuid(&claims.sub, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let mut user = User::find_by_uuid(&claims.sub, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     if let Some(public_key) = body["publicKey"].as_str() {
         user.public_key = Some(public_key.to_string());
@@ -85,9 +79,7 @@ pub async fn revision_date(req: Request, env: &Env) -> Result<Response> {
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let user = User::find_by_uuid(&claims.sub, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let user = User::find_by_uuid(&claims.sub, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     // Return as milliseconds timestamp
     let dt = crate::util::parse_date(&user.updated_at);
@@ -99,9 +91,7 @@ pub async fn revision_date(req: Request, env: &Env) -> Result<Response> {
 /// POST /api/accounts/password-hint
 pub async fn password_hint(mut req: Request, env: &Env) -> Result<Response> {
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
-    let email = body["email"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("email is required"))?;
+    let email = body["email"].as_str().ok_or_else(|| Error::bad_request("email is required"))?;
 
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
@@ -121,13 +111,10 @@ pub async fn verify_password(mut req: Request, env: &Env) -> Result<Response> {
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
-    let master_password_hash = body["masterPasswordHash"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
+    let master_password_hash =
+        body["masterPasswordHash"].as_str().ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
 
-    let user = User::find_by_uuid(&claims.sub, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let user = User::find_by_uuid(&claims.sub, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     if !user.check_valid_password(master_password_hash) {
         return Err(Error::bad_request("Invalid password"));
@@ -144,14 +131,11 @@ pub async fn post_kdf(mut req: Request, env: &Env) -> Result<Response> {
 
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
 
-    let mut user = User::find_by_uuid(&claims.sub, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let mut user = User::find_by_uuid(&claims.sub, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     // Verify current password
-    let master_password_hash = body["masterPasswordHash"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
+    let master_password_hash =
+        body["masterPasswordHash"].as_str().ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
     if !user.check_valid_password(master_password_hash) {
         return Err(Error::bad_request("Invalid password"));
     }
@@ -162,10 +146,8 @@ pub async fn post_kdf(mut req: Request, env: &Env) -> Result<Response> {
         .ok_or_else(|| Error::bad_request("newMasterPasswordHash is required"))?;
     let key = body["key"].as_str().ok_or_else(|| Error::bad_request("key is required"))?;
 
-    let server_iterations: u32 = env
-        .var("PASSWORD_ITERATIONS")
-        .map(|v| v.to_string().parse().unwrap_or(600000))
-        .unwrap_or(600000);
+    let server_iterations: u32 =
+        env.var("PASSWORD_ITERATIONS").map(|v| v.to_string().parse().unwrap_or(600000)).unwrap_or(600000);
 
     user.set_password(new_master_password_hash, user.password_hint.clone(), server_iterations);
     user.akey = key.to_string();
@@ -194,13 +176,10 @@ pub async fn post_password(mut req: Request, env: &Env) -> Result<Response> {
 
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
 
-    let mut user = User::find_by_uuid(&claims.sub, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let mut user = User::find_by_uuid(&claims.sub, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
-    let master_password_hash = body["masterPasswordHash"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
+    let master_password_hash =
+        body["masterPasswordHash"].as_str().ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
     if !user.check_valid_password(master_password_hash) {
         return Err(Error::bad_request("Invalid password"));
     }
@@ -208,14 +187,10 @@ pub async fn post_password(mut req: Request, env: &Env) -> Result<Response> {
     let new_hash = body["newMasterPasswordHash"]
         .as_str()
         .ok_or_else(|| Error::bad_request("newMasterPasswordHash is required"))?;
-    let key = body["key"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("key is required"))?;
+    let key = body["key"].as_str().ok_or_else(|| Error::bad_request("key is required"))?;
 
-    let server_iterations: u32 = env
-        .var("PASSWORD_ITERATIONS")
-        .map(|v| v.to_string().parse().unwrap_or(600000))
-        .unwrap_or(600000);
+    let server_iterations: u32 =
+        env.var("PASSWORD_ITERATIONS").map(|v| v.to_string().parse().unwrap_or(600000)).unwrap_or(600000);
 
     let hint = body["masterPasswordHint"].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     user.set_password(new_hash, hint, server_iterations);
@@ -237,13 +212,10 @@ pub async fn delete_account(mut req: Request, env: &Env) -> Result<Response> {
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
     let body: Value = req.json().await.unwrap_or(serde_json::json!({}));
-    let master_password_hash = body["masterPasswordHash"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
+    let master_password_hash =
+        body["masterPasswordHash"].as_str().ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
 
-    let user = User::find_by_uuid(&claims.sub, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let user = User::find_by_uuid(&claims.sub, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     if !user.check_valid_password(master_password_hash) {
         return Err(Error::bad_request("Invalid password"));
@@ -260,13 +232,10 @@ pub async fn post_security_stamp(mut req: Request, env: &Env) -> Result<Response
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
-    let master_password_hash = body["masterPasswordHash"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
+    let master_password_hash =
+        body["masterPasswordHash"].as_str().ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
 
-    let mut user = User::find_by_uuid(&claims.sub, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let mut user = User::find_by_uuid(&claims.sub, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     if !user.check_valid_password(master_password_hash) {
         return Err(Error::bad_request("Invalid password"));
@@ -286,13 +255,10 @@ pub async fn get_api_key(mut req: Request, env: &Env) -> Result<Response> {
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
-    let master_password_hash = body["masterPasswordHash"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
+    let master_password_hash =
+        body["masterPasswordHash"].as_str().ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
 
-    let mut user = User::find_by_uuid(&claims.sub, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let mut user = User::find_by_uuid(&claims.sub, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     if !user.check_valid_password(master_password_hash) {
         return Err(Error::bad_request("Invalid password"));
@@ -319,13 +285,10 @@ pub async fn rotate_api_key(mut req: Request, env: &Env) -> Result<Response> {
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
-    let master_password_hash = body["masterPasswordHash"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
+    let master_password_hash =
+        body["masterPasswordHash"].as_str().ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
 
-    let mut user = User::find_by_uuid(&claims.sub, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let mut user = User::find_by_uuid(&claims.sub, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     if !user.check_valid_password(master_password_hash) {
         return Err(Error::bad_request("Invalid password"));
@@ -377,7 +340,5 @@ pub async fn get_collections(req: Request, env: &Env) -> Result<Response> {
 }
 
 fn get_domain(env: &Env) -> String {
-    env.var("DOMAIN")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| "https://vaultwarden.example.com".to_string())
+    env.var("DOMAIN").map(|v| v.to_string()).unwrap_or_else(|_| "https://vaultwarden.example.com".to_string())
 }

@@ -64,9 +64,8 @@ pub fn decode_jwt<T: DeserializeOwned>(token: &str, issuer: &str, env: &Env) -> 
 
     // Verify signature
     let signing_input = format!("{}.{}", parts[0], parts[1]);
-    let sig_bytes = URL_SAFE_NO_PAD
-        .decode(parts[2])
-        .map_err(|_| Error::unauthorized("Invalid token signature encoding"))?;
+    let sig_bytes =
+        URL_SAFE_NO_PAD.decode(parts[2]).map_err(|_| Error::unauthorized("Invalid token signature encoding"))?;
     let signature = rsa::pkcs1v15::Signature::try_from(sig_bytes.as_slice())
         .map_err(|_| Error::unauthorized("Invalid signature"))?;
     verifying_key
@@ -74,11 +73,9 @@ pub fn decode_jwt<T: DeserializeOwned>(token: &str, issuer: &str, env: &Env) -> 
         .map_err(|_| Error::unauthorized("Token signature verification failed"))?;
 
     // Decode payload
-    let payload_bytes = URL_SAFE_NO_PAD
-        .decode(parts[1])
-        .map_err(|_| Error::unauthorized("Invalid token payload encoding"))?;
-    let claims: T =
-        serde_json::from_slice(&payload_bytes).map_err(|_| Error::unauthorized("Invalid token payload"))?;
+    let payload_bytes =
+        URL_SAFE_NO_PAD.decode(parts[1]).map_err(|_| Error::unauthorized("Invalid token payload encoding"))?;
+    let claims: T = serde_json::from_slice(&payload_bytes).map_err(|_| Error::unauthorized("Invalid token payload"))?;
 
     // Verify header matches expected RS256
     if parts[0] != JWT_HEADER_B64 {
@@ -86,15 +83,13 @@ pub fn decode_jwt<T: DeserializeOwned>(token: &str, issuer: &str, env: &Env) -> 
     }
 
     // Verify issuer and expiration (mandatory)
-    let raw: serde_json::Value = serde_json::from_slice(&payload_bytes)
-        .map_err(|_| Error::unauthorized("Invalid token payload structure"))?;
-    let iss = raw.get("iss").and_then(|v| v.as_str())
-        .ok_or_else(|| Error::unauthorized("Token missing issuer"))?;
+    let raw: serde_json::Value =
+        serde_json::from_slice(&payload_bytes).map_err(|_| Error::unauthorized("Invalid token payload structure"))?;
+    let iss = raw.get("iss").and_then(|v| v.as_str()).ok_or_else(|| Error::unauthorized("Token missing issuer"))?;
     if iss != issuer {
         return Err(Error::unauthorized("Invalid token issuer"));
     }
-    let exp = raw.get("exp").and_then(|v| v.as_i64())
-        .ok_or_else(|| Error::unauthorized("Token missing expiration"))?;
+    let exp = raw.get("exp").and_then(|v| v.as_i64()).ok_or_else(|| Error::unauthorized("Token missing expiration"))?;
     if exp < chrono::Utc::now().timestamp() {
         return Err(Error::unauthorized("Token has expired"));
     }
@@ -116,8 +111,8 @@ pub struct LoginJwtClaims {
     pub name: String,
     pub email: String,
     pub email_verified: bool,
-    pub sstamp: String,    // security stamp
-    pub device: String,    // device UUID
+    pub sstamp: String, // security stamp
+    pub device: String, // device UUID
     pub devicetype: String,
     pub client_id: String,
     pub scope: Vec<String>,
@@ -227,23 +222,14 @@ pub fn get_auth_user(req: &worker::Request, domain: &str, env: &Env) -> Result<L
 /// Validate that the security stamp in the JWT matches the user's current stamp.
 /// Call this after get_auth_user when you need to ensure the token hasn't been
 /// invalidated by a password change or security stamp rotation.
-pub async fn validate_security_stamp(
-    claims: &LoginJwtClaims,
-    d1: &worker::D1Database,
-) -> Result<()> {
-    let user: Option<crate::models::User> = crate::db::query_one(
-        d1,
-        "SELECT * FROM users WHERE uuid = ?1",
-        &[crate::db::val(&claims.sub)],
-    )
-    .await?;
+pub async fn validate_security_stamp(claims: &LoginJwtClaims, d1: &worker::D1Database) -> Result<()> {
+    let user: Option<crate::models::User> =
+        crate::db::query_one(d1, "SELECT * FROM users WHERE uuid = ?1", &[crate::db::val(&claims.sub)]).await?;
 
     let user = user.ok_or_else(|| Error::unauthorized("User not found"))?;
 
     if user.security_stamp != claims.sstamp {
-        return Err(Error::unauthorized(
-            "Token has been invalidated. Please login again.",
-        ));
+        return Err(Error::unauthorized("Token has been invalidated. Please login again."));
     }
     Ok(())
 }

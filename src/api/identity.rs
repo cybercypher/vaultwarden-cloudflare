@@ -23,10 +23,21 @@ pub async fn login(mut req: Request, env: &Env) -> Result<Response> {
         "authorization_code" => {
             let code = params.get("code").ok_or_else(|| Error::bad_request("code required"))?;
             let code_verifier = params.get("code_verifier").map(|s| s.as_str());
-            let device_identifier = params.get("deviceIdentifier").ok_or_else(|| Error::bad_request("deviceIdentifier required"))?;
+            let device_identifier =
+                params.get("deviceIdentifier").ok_or_else(|| Error::bad_request("deviceIdentifier required"))?;
             let device_name = params.get("deviceName").unwrap_or(&"SSO".to_string()).clone();
             let device_type: i32 = params.get("deviceType").and_then(|s| s.parse().ok()).unwrap_or(14);
-            crate::api::sso::sso_login(code, code_verifier, device_identifier, &device_name, device_type, &d1, env, &domain).await
+            crate::api::sso::sso_login(
+                code,
+                code_verifier,
+                device_identifier,
+                &device_name,
+                device_type,
+                &d1,
+                env,
+                &domain,
+            )
+            .await
         }
         _ => Err(Error::bad_request(format!("Unsupported grant_type: {grant_type}"))),
     }
@@ -53,12 +64,10 @@ async fn password_login(
         }
     }
     let client_id = params.get("client_id").map(|s| s.as_str()).unwrap_or("web");
-    let device_identifier = params.get("deviceIdentifier").ok_or_else(|| Error::bad_request("deviceIdentifier required"))?;
+    let device_identifier =
+        params.get("deviceIdentifier").ok_or_else(|| Error::bad_request("deviceIdentifier required"))?;
     let device_name = params.get("deviceName").unwrap_or(&"Unknown".to_string()).clone();
-    let device_type: i32 = params
-        .get("deviceType")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    let device_type: i32 = params.get("deviceType").and_then(|s| s.parse().ok()).unwrap_or(0);
 
     // Find user
     let user = User::find_by_email(username, d1)
@@ -74,9 +83,9 @@ async fn password_login(
         // Increment rate limit counter on failure
         if let Ok(kv) = env.kv("KV") {
             let key = format!("ratelimit_login_{}", username.to_lowercase());
-            let count: u32 = kv.get(&key).text().await.ok().flatten()
-                .and_then(|s| s.parse().ok()).unwrap_or(0);
-            let _ = kv.put(&key, &(count + 1).to_string())
+            let count: u32 = kv.get(&key).text().await.ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let _ = kv
+                .put(&key, &(count + 1).to_string())
                 .map(|p| p.expiration_ttl(900)) // 15 minute window
                 .ok();
             if let Some(p) = kv.put(&key, &(count + 1).to_string()).ok() {
@@ -90,24 +99,13 @@ async fn password_login(
     let two_factor_token = params.get("twoFactorToken").map(|s| s.as_str());
     let two_factor_provider = params.get("twoFactorProvider").and_then(|s| s.parse::<i32>().ok());
     let two_factor_remember = params.get("twoFactorRemember").map(|s| s.as_str());
-    crate::api::twofactor::verify_2fa(
-        &user.uuid,
-        two_factor_token,
-        two_factor_provider,
-        two_factor_remember,
-        d1,
-        env,
-    ).await?;
+    crate::api::twofactor::verify_2fa(&user.uuid, two_factor_token, two_factor_provider, two_factor_remember, d1, env)
+        .await?;
 
     // Find or create device
     let mut device = match Device::find_by_uuid_and_user(device_identifier, &user.uuid, d1).await? {
         Some(d) => d,
-        None => Device::new(
-            device_identifier.to_string(),
-            user.uuid.clone(),
-            device_name,
-            device_type,
-        ),
+        None => Device::new(device_identifier.to_string(), user.uuid.clone(), device_name, device_type),
     };
 
     // Generate new refresh token
@@ -173,9 +171,7 @@ async fn refresh_login(
     env: &Env,
     domain: &str,
 ) -> Result<Response> {
-    let refresh_token_str = params
-        .get("refresh_token")
-        .ok_or_else(|| Error::bad_request("refresh_token required"))?;
+    let refresh_token_str = params.get("refresh_token").ok_or_else(|| Error::bad_request("refresh_token required"))?;
 
     // Decode the refresh token JWT to get the inner token identifier
     let refresh_claims = auth::decode_refresh(refresh_token_str, domain, env)?;
@@ -185,9 +181,7 @@ async fn refresh_login(
         .await?
         .ok_or_else(|| Error::unauthorized("Invalid refresh token"))?;
 
-    let user = User::find_by_uuid(&device.user_uuid, d1)
-        .await?
-        .ok_or_else(|| Error::unauthorized("User not found"))?;
+    let user = User::find_by_uuid(&device.user_uuid, d1).await?.ok_or_else(|| Error::unauthorized("User not found"))?;
 
     if user.enabled == 0 {
         return Err(Error::bad_request("This user has been disabled."));
@@ -254,18 +248,15 @@ async fn api_key_login(
 ) -> Result<Response> {
     let client_id = params.get("client_id").ok_or_else(|| Error::bad_request("client_id required"))?;
     let client_secret = params.get("client_secret").ok_or_else(|| Error::bad_request("client_secret required"))?;
-    let device_identifier = params.get("deviceIdentifier").ok_or_else(|| Error::bad_request("deviceIdentifier required"))?;
+    let device_identifier =
+        params.get("deviceIdentifier").ok_or_else(|| Error::bad_request("deviceIdentifier required"))?;
     let device_name = params.get("deviceName").unwrap_or(&"Unknown".to_string()).clone();
     let device_type: i32 = params.get("deviceType").and_then(|s| s.parse().ok()).unwrap_or(0);
 
     // client_id format: "user.UUID"
-    let user_uuid = client_id
-        .strip_prefix("user.")
-        .ok_or_else(|| Error::bad_request("Invalid client_id format"))?;
+    let user_uuid = client_id.strip_prefix("user.").ok_or_else(|| Error::bad_request("Invalid client_id format"))?;
 
-    let user = User::find_by_uuid(user_uuid, d1)
-        .await?
-        .ok_or_else(|| Error::bad_request("Invalid API key"))?;
+    let user = User::find_by_uuid(user_uuid, d1).await?.ok_or_else(|| Error::bad_request("Invalid API key"))?;
 
     // Verify API key
     let user_api_key = user.api_key.as_deref().ok_or_else(|| Error::bad_request("API key not set"))?;
@@ -317,9 +308,7 @@ async fn api_key_login(
 /// POST /identity/accounts/prelogin
 pub async fn prelogin(mut req: Request, env: &Env) -> Result<Response> {
     let body: Value = req.json().await.map_err(|e| Error::bad_request(format!("Invalid JSON: {e}")))?;
-    let email = body["email"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("email is required"))?;
+    let email = body["email"].as_str().ok_or_else(|| Error::bad_request("email is required"))?;
 
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
@@ -349,31 +338,29 @@ pub async fn register(mut req: Request, env: &Env) -> Result<Response> {
 
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let signups_allowed = env
-        .var("SIGNUPS_ALLOWED")
-        .map(|v| v.to_string() == "true")
-        .unwrap_or(true);
+    let signups_allowed = env.var("SIGNUPS_ALLOWED").map(|v| v.to_string() == "true").unwrap_or(true);
 
     // If signups are disabled, check for an admin invitation
     if !signups_allowed {
         let email_check = body["email"].as_str().unwrap_or("").to_lowercase();
         #[derive(serde::Deserialize)]
-        struct Inv { email: String }
+        struct Inv {
+            email: String,
+        }
         let invite: Option<Inv> = crate::db::query_one(
-            &d1, "SELECT email FROM invitations WHERE email = ?1", &[crate::db::val(&email_check)],
-        ).await?;
+            &d1,
+            "SELECT email FROM invitations WHERE email = ?1",
+            &[crate::db::val(&email_check)],
+        )
+        .await?;
         if invite.is_none() {
             return Err(Error::bad_request("Registration is not allowed."));
         }
     }
 
-    let email = body["email"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("email is required"))?
-        .to_lowercase();
-    let master_password_hash = body["masterPasswordHash"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
+    let email = body["email"].as_str().ok_or_else(|| Error::bad_request("email is required"))?.to_lowercase();
+    let master_password_hash =
+        body["masterPasswordHash"].as_str().ok_or_else(|| Error::bad_request("masterPasswordHash is required"))?;
     let key = body["key"]
         .as_str()
         .or_else(|| body["userSymmetricKey"].as_str())
@@ -381,15 +368,11 @@ pub async fn register(mut req: Request, env: &Env) -> Result<Response> {
 
     // Check for existing user (use same error message to prevent user enumeration)
     if User::find_by_email(&email, &d1).await?.is_some() {
-        return Err(Error::bad_request(
-            "Registration is not allowed.",
-        ));
+        return Err(Error::bad_request("Registration is not allowed."));
     }
 
-    let server_iterations: u32 = env
-        .var("PASSWORD_ITERATIONS")
-        .map(|v| v.to_string().parse().unwrap_or(600000))
-        .unwrap_or(600000);
+    let server_iterations: u32 =
+        env.var("PASSWORD_ITERATIONS").map(|v| v.to_string().parse().unwrap_or(600000)).unwrap_or(600000);
 
     let mut user = User::new(email);
     user.set_password(master_password_hash, None, server_iterations);
@@ -438,27 +421,19 @@ pub async fn register(mut req: Request, env: &Env) -> Result<Response> {
     // Send welcome email if mail is configured
     let _ = crate::mail::send_welcome(env, &user.email).await;
 
-    Response::from_json(&json!({}))
-        .map(|r| r.with_status(200))
-        .map_err(|e| Error::internal(e.to_string()))
+    Response::from_json(&json!({})).map(|r| r.with_status(200)).map_err(|e| Error::internal(e.to_string()))
 }
 
 // Helper functions
 
 fn get_domain(env: &Env) -> String {
-    env.var("DOMAIN")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| "https://vaultwarden.example.com".to_string())
+    env.var("DOMAIN").map(|v| v.to_string()).unwrap_or_else(|_| "https://vaultwarden.example.com".to_string())
 }
 
 fn get_access_validity(env: &Env) -> i64 {
-    env.var("ACCESS_TOKEN_VALIDITY")
-        .map(|v| v.to_string().parse().unwrap_or(7200))
-        .unwrap_or(7200)
+    env.var("ACCESS_TOKEN_VALIDITY").map(|v| v.to_string().parse().unwrap_or(7200)).unwrap_or(7200)
 }
 
 fn get_refresh_validity_days(env: &Env) -> i64 {
-    env.var("REFRESH_TOKEN_VALIDITY_DAYS")
-        .map(|v| v.to_string().parse().unwrap_or(30))
-        .unwrap_or(30)
+    env.var("REFRESH_TOKEN_VALIDITY_DAYS").map(|v| v.to_string().parse().unwrap_or(30)).unwrap_or(30)
 }

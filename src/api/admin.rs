@@ -33,9 +33,7 @@ fn verify_admin_token(req: &Request, env: &Env) -> Result<()> {
 /// POST /admin (login with admin token)
 pub async fn admin_login(mut req: Request, env: &Env) -> Result<Response> {
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
-    let token = body["token"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("token required"))?;
+    let token = body["token"].as_str().ok_or_else(|| Error::bad_request("token required"))?;
 
     let admin_token = env
         .secret("ADMIN_TOKEN")
@@ -72,19 +70,22 @@ pub async fn get_users(req: Request, env: &Env) -> Result<Response> {
 
     let users: Vec<User> = db::query_all(&d1, "SELECT * FROM users ORDER BY created_at DESC", &[]).await?;
 
-    let user_list: Vec<Value> = users.iter().map(|u| {
-        json!({
-            "id": u.uuid,
-            "email": u.email,
-            "name": u.name,
-            "enabled": u.enabled != 0,
-            "emailVerified": u.verified_at.is_some(),
-            "createdAt": util::format_date(&u.created_at),
-            "lastActive": util::format_date(&u.updated_at),
-            "twoFactorEnabled": false,
-            "object": "user",
+    let user_list: Vec<Value> = users
+        .iter()
+        .map(|u| {
+            json!({
+                "id": u.uuid,
+                "email": u.email,
+                "name": u.name,
+                "enabled": u.enabled != 0,
+                "emailVerified": u.verified_at.is_some(),
+                "createdAt": util::format_date(&u.created_at),
+                "lastActive": util::format_date(&u.updated_at),
+                "twoFactorEnabled": false,
+                "object": "user",
+            })
         })
-    }).collect();
+        .collect();
 
     Response::from_json(&json!(user_list)).map_err(|e| Error::internal(e.to_string()))
 }
@@ -107,7 +108,8 @@ pub async fn disable_user(req: Request, env: &Env, user_id: &str) -> Result<Resp
         &d1,
         "UPDATE users SET enabled = 0, updated_at = ?1 WHERE uuid = ?2",
         &[db::val(&util::now_utc()), db::val(user_id)],
-    ).await?;
+    )
+    .await?;
 
     // Force logout
     crate::notifications::notify_logout(env, user_id, None).await;
@@ -124,7 +126,8 @@ pub async fn enable_user(req: Request, env: &Env, user_id: &str) -> Result<Respo
         &d1,
         "UPDATE users SET enabled = 1, updated_at = ?1 WHERE uuid = ?2",
         &[db::val(&util::now_utc()), db::val(user_id)],
-    ).await?;
+    )
+    .await?;
 
     Response::ok("").map_err(|e| Error::internal(e.to_string()))
 }
@@ -139,7 +142,8 @@ pub async fn deauth_user(req: Request, env: &Env, user_id: &str) -> Result<Respo
         &d1,
         "UPDATE users SET security_stamp = ?1, updated_at = ?2 WHERE uuid = ?3",
         &[db::val(&util::get_uuid()), db::val(&util::now_utc()), db::val(user_id)],
-    ).await?;
+    )
+    .await?;
 
     crate::notifications::notify_logout(env, user_id, None).await;
 
@@ -162,17 +166,10 @@ pub async fn invite_user(mut req: Request, env: &Env) -> Result<Response> {
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
-    let email = body["email"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("email required"))?
-        .to_lowercase();
+    let email = body["email"].as_str().ok_or_else(|| Error::bad_request("email required"))?.to_lowercase();
 
     // Create invitation
-    db::execute(
-        &d1,
-        "INSERT OR IGNORE INTO invitations (email) VALUES (?1)",
-        &[db::val(&email)],
-    ).await?;
+    db::execute(&d1, "INSERT OR IGNORE INTO invitations (email) VALUES (?1)", &[db::val(&email)]).await?;
 
     // Send invite email
     let domain = env.var("DOMAIN").map(|v| v.to_string()).unwrap_or_default();
@@ -187,18 +184,25 @@ pub async fn organizations_overview(req: Request, env: &Env) -> Result<Response>
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
     #[derive(serde::Deserialize)]
-    struct Org { uuid: String, name: String, billing_email: String }
+    struct Org {
+        uuid: String,
+        name: String,
+        billing_email: String,
+    }
 
     let orgs: Vec<Org> = db::query_all(&d1, "SELECT uuid, name, billing_email FROM organizations", &[]).await?;
 
-    let org_list: Vec<Value> = orgs.iter().map(|o| {
-        json!({
-            "id": o.uuid,
-            "name": o.name,
-            "billingEmail": o.billing_email,
-            "object": "organization",
+    let org_list: Vec<Value> = orgs
+        .iter()
+        .map(|o| {
+            json!({
+                "id": o.uuid,
+                "name": o.name,
+                "billingEmail": o.billing_email,
+                "object": "organization",
+            })
         })
-    }).collect();
+        .collect();
 
     Response::from_json(&json!(org_list)).map_err(|e| Error::internal(e.to_string()))
 }
@@ -209,7 +213,9 @@ pub async fn diagnostics(req: Request, env: &Env) -> Result<Response> {
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
     #[derive(serde::Deserialize)]
-    struct Count { count: i64 }
+    struct Count {
+        count: i64,
+    }
     let user_count: Option<Count> = db::query_one(&d1, "SELECT COUNT(*) as count FROM users", &[]).await?;
     let cipher_count: Option<Count> = db::query_one(&d1, "SELECT COUNT(*) as count FROM ciphers", &[]).await?;
     let org_count: Option<Count> = db::query_one(&d1, "SELECT COUNT(*) as count FROM organizations", &[]).await?;
@@ -238,10 +244,17 @@ pub async fn get_config(req: Request, env: &Env) -> Result<Response> {
     verify_admin_token(&req, env)?;
 
     let vars = [
-        "DOMAIN", "SIGNUPS_ALLOWED", "PASSWORD_ITERATIONS",
-        "ACCESS_TOKEN_VALIDITY", "REFRESH_TOKEN_VALIDITY_DAYS",
-        "MAIL_ENABLED", "MAIL_BACKEND", "MAIL_FROM",
-        "SSO_ENABLED", "SSO_AUTHORITY", "SSO_CLIENT_ID",
+        "DOMAIN",
+        "SIGNUPS_ALLOWED",
+        "PASSWORD_ITERATIONS",
+        "ACCESS_TOKEN_VALIDITY",
+        "REFRESH_TOKEN_VALIDITY_DAYS",
+        "MAIL_ENABLED",
+        "MAIL_BACKEND",
+        "MAIL_FROM",
+        "SSO_ENABLED",
+        "SSO_AUTHORITY",
+        "SSO_CLIENT_ID",
     ];
 
     let mut config = serde_json::Map::new();
@@ -258,11 +271,16 @@ pub async fn test_smtp(mut req: Request, env: &Env) -> Result<Response> {
     verify_admin_token(&req, env)?;
 
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
-    let email = body["email"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("email required"))?;
+    let email = body["email"].as_str().ok_or_else(|| Error::bad_request("email required"))?;
 
-    crate::mail::send_email(env, email, "Vaultwarden SMTP Test", "<p>This is a test email from Vaultwarden on Cloudflare Workers.</p>", "This is a test email from Vaultwarden on Cloudflare Workers.").await?;
+    crate::mail::send_email(
+        env,
+        email,
+        "Vaultwarden SMTP Test",
+        "<p>This is a test email from Vaultwarden on Cloudflare Workers.</p>",
+        "This is a test email from Vaultwarden on Cloudflare Workers.",
+    )
+    .await?;
 
     Response::ok("Email sent successfully").map_err(|e| Error::internal(e.to_string()))
 }
@@ -272,18 +290,24 @@ pub async fn get_user(req: Request, env: &Env, user_id: &str) -> Result<Response
     verify_admin_token(&req, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let user = User::find_by_uuid(user_id, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let user = User::find_by_uuid(user_id, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     #[derive(serde::Deserialize)]
-    struct Count { count: i64 }
+    struct Count {
+        count: i64,
+    }
     let org_count: Option<Count> = db::query_one(
-        &d1, "SELECT COUNT(*) as count FROM users_organizations WHERE user_uuid = ?1", &[db::val(user_id)],
-    ).await?;
+        &d1,
+        "SELECT COUNT(*) as count FROM users_organizations WHERE user_uuid = ?1",
+        &[db::val(user_id)],
+    )
+    .await?;
     let tf_count: Option<Count> = db::query_one(
-        &d1, "SELECT COUNT(*) as count FROM twofactor WHERE user_uuid = ?1 AND enabled = 1", &[db::val(user_id)],
-    ).await?;
+        &d1,
+        "SELECT COUNT(*) as count FROM twofactor WHERE user_uuid = ?1 AND enabled = 1",
+        &[db::val(user_id)],
+    )
+    .await?;
 
     let response = json!({
         "id": user.uuid,
@@ -305,9 +329,7 @@ pub async fn get_user_by_email(req: Request, env: &Env, email: &str) -> Result<R
     verify_admin_token(&req, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let user = User::find_by_email(email, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let user = User::find_by_email(email, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     let response = json!({
         "id": user.uuid,
@@ -333,9 +355,7 @@ pub async fn resend_invite(req: Request, env: &Env, user_id: &str) -> Result<Res
     verify_admin_token(&req, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let user = User::find_by_uuid(user_id, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let user = User::find_by_uuid(user_id, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
     let _ = crate::mail::send_welcome(env, &user.email).await;
     Response::ok("").map_err(|e| Error::internal(e.to_string()))
 }
@@ -377,14 +397,11 @@ pub async fn test_http(req: Request, env: &Env) -> Result<Response> {
     verify_admin_token(&req, env)?;
 
     let url = req.url().map_err(|e| Error::internal(e.to_string()))?;
-    let code = url.query_pairs()
-        .find(|(k, _)| k == "code")
-        .map(|(_, v)| v.to_string())
-        .unwrap_or_else(|| "200".to_string());
+    let code =
+        url.query_pairs().find(|(k, _)| k == "code").map(|(_, v)| v.to_string()).unwrap_or_else(|| "200".to_string());
 
     let test_url = format!("https://httpbin.org/status/{}", code);
-    let test_req = worker::Request::new(&test_url, worker::Method::Get)
-        .map_err(|e| Error::internal(e.to_string()))?;
+    let test_req = worker::Request::new(&test_url, worker::Method::Get).map_err(|e| Error::internal(e.to_string()))?;
 
     match worker::Fetch::Request(test_req).send().await {
         Ok(resp) => {

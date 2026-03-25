@@ -37,9 +37,7 @@ pub async fn get(req: Request, env: &Env, uuid: &str) -> Result<Response> {
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let cipher = Cipher::find_by_uuid(uuid, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("Cipher not found"))?;
+    let cipher = Cipher::find_by_uuid(uuid, &d1).await?.ok_or_else(|| Error::not_found("Cipher not found"))?;
 
     if !cipher.is_accessible_to_user(&claims.sub, &d1).await? {
         return Err(Error::not_found("Cipher not found"));
@@ -86,9 +84,14 @@ pub async fn create(mut req: Request, env: &Env) -> Result<Response> {
     let json = cipher.to_json(folder_id.as_deref(), favorite, &[]);
 
     crate::notifications::notify_cipher_update(
-        env, crate::notifications::UpdateType::SyncCipherCreate,
-        &cipher.uuid, &claims.sub, cipher.organization_uuid.as_deref(), Some(&claims.device),
-    ).await;
+        env,
+        crate::notifications::UpdateType::SyncCipherCreate,
+        &cipher.uuid,
+        &claims.sub,
+        cipher.organization_uuid.as_deref(),
+        Some(&claims.device),
+    )
+    .await;
 
     Response::from_json(&json).map_err(|e| Error::internal(e.to_string()))
 }
@@ -99,9 +102,7 @@ pub async fn update(mut req: Request, env: &Env, uuid: &str) -> Result<Response>
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let existing = Cipher::find_by_uuid(uuid, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("Cipher not found"))?;
+    let existing = Cipher::find_by_uuid(uuid, &d1).await?.ok_or_else(|| Error::not_found("Cipher not found"))?;
 
     if !existing.is_accessible_to_user(&claims.sub, &d1).await? {
         return Err(Error::not_found("Cipher not found"));
@@ -135,9 +136,14 @@ pub async fn update(mut req: Request, env: &Env, uuid: &str) -> Result<Response>
     let json = cipher.to_json(folder_id.as_deref(), favorite, &[]);
 
     crate::notifications::notify_cipher_update(
-        env, crate::notifications::UpdateType::SyncCipherUpdate,
-        &cipher.uuid, &claims.sub, cipher.organization_uuid.as_deref(), Some(&claims.device),
-    ).await;
+        env,
+        crate::notifications::UpdateType::SyncCipherUpdate,
+        &cipher.uuid,
+        &claims.sub,
+        cipher.organization_uuid.as_deref(),
+        Some(&claims.device),
+    )
+    .await;
 
     Response::from_json(&json).map_err(|e| Error::internal(e.to_string()))
 }
@@ -148,18 +154,21 @@ pub async fn delete(req: Request, env: &Env, uuid: &str) -> Result<Response> {
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let cipher = Cipher::find_by_uuid(uuid, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("Cipher not found"))?;
+    let cipher = Cipher::find_by_uuid(uuid, &d1).await?.ok_or_else(|| Error::not_found("Cipher not found"))?;
 
     if !cipher.is_accessible_to_user(&claims.sub, &d1).await? {
         return Err(Error::not_found("Cipher not found"));
     }
 
     crate::notifications::notify_cipher_update(
-        env, crate::notifications::UpdateType::SyncLoginDelete,
-        uuid, &claims.sub, cipher.organization_uuid.as_deref(), Some(&claims.device),
-    ).await;
+        env,
+        crate::notifications::UpdateType::SyncLoginDelete,
+        uuid,
+        &claims.sub,
+        cipher.organization_uuid.as_deref(),
+        Some(&claims.device),
+    )
+    .await;
 
     Cipher::delete(uuid, &d1).await?;
     Response::ok("").map_err(|e| Error::internal(e.to_string()))
@@ -171,9 +180,7 @@ pub async fn soft_delete(req: Request, env: &Env, uuid: &str) -> Result<Response
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let cipher = Cipher::find_by_uuid(uuid, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("Cipher not found"))?;
+    let cipher = Cipher::find_by_uuid(uuid, &d1).await?.ok_or_else(|| Error::not_found("Cipher not found"))?;
 
     if !cipher.is_accessible_to_user(&claims.sub, &d1).await? {
         return Err(Error::not_found("Cipher not found"));
@@ -189,9 +196,7 @@ pub async fn restore(req: Request, env: &Env, uuid: &str) -> Result<Response> {
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let cipher = Cipher::find_by_uuid(uuid, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("Cipher not found"))?;
+    let cipher = Cipher::find_by_uuid(uuid, &d1).await?.ok_or_else(|| Error::not_found("Cipher not found"))?;
 
     if !cipher.is_accessible_to_user(&claims.sub, &d1).await? {
         return Err(Error::not_found("Cipher not found"));
@@ -259,9 +264,7 @@ pub async fn delete_selected(mut req: Request, env: &Env) -> Result<Response> {
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
-    let ids = body["ids"]
-        .as_array()
-        .ok_or_else(|| Error::bad_request("ids array required"))?;
+    let ids = body["ids"].as_array().ok_or_else(|| Error::bad_request("ids array required"))?;
 
     for id in ids {
         if let Some(uuid) = id.as_str() {
@@ -284,9 +287,7 @@ pub async fn move_selected(mut req: Request, env: &Env) -> Result<Response> {
 
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
     let folder_id = body["folderId"].as_str();
-    let ids = body["ids"]
-        .as_array()
-        .ok_or_else(|| Error::bad_request("ids array required"))?;
+    let ids = body["ids"].as_array().ok_or_else(|| Error::bad_request("ids array required"))?;
 
     // Validate folder ownership if a folder is specified
     if let Some(fid) = folder_id {
@@ -323,13 +324,11 @@ pub async fn purge(mut req: Request, env: &Env) -> Result<Response> {
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
-    let master_password_hash = body["masterPasswordHash"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("masterPasswordHash required"))?;
+    let master_password_hash =
+        body["masterPasswordHash"].as_str().ok_or_else(|| Error::bad_request("masterPasswordHash required"))?;
 
-    let user = crate::models::User::find_by_uuid(&claims.sub, &d1)
-        .await?
-        .ok_or_else(|| Error::not_found("User not found"))?;
+    let user =
+        crate::models::User::find_by_uuid(&claims.sub, &d1).await?.ok_or_else(|| Error::not_found("User not found"))?;
 
     if !user.check_valid_password(master_password_hash) {
         return Err(Error::bad_request("Invalid password"));
@@ -340,22 +339,21 @@ pub async fn purge(mut req: Request, env: &Env) -> Result<Response> {
         &d1,
         "DELETE FROM folders_ciphers WHERE cipher_uuid IN (SELECT uuid FROM ciphers WHERE user_uuid = ?1)",
         &[crate::db::val(&claims.sub)],
-    ).await?;
+    )
+    .await?;
     crate::db::execute(
         &d1,
         "DELETE FROM favorites WHERE cipher_uuid IN (SELECT uuid FROM ciphers WHERE user_uuid = ?1)",
         &[crate::db::val(&claims.sub)],
-    ).await?;
+    )
+    .await?;
     crate::db::execute(
         &d1,
         "DELETE FROM attachments WHERE cipher_uuid IN (SELECT uuid FROM ciphers WHERE user_uuid = ?1)",
         &[crate::db::val(&claims.sub)],
-    ).await?;
-    crate::db::execute(
-        &d1,
-        "DELETE FROM ciphers WHERE user_uuid = ?1",
-        &[crate::db::val(&claims.sub)],
-    ).await?;
+    )
+    .await?;
+    crate::db::execute(&d1, "DELETE FROM ciphers WHERE user_uuid = ?1", &[crate::db::val(&claims.sub)]).await?;
 
     Response::ok("").map_err(|e| Error::internal(e.to_string()))
 }
@@ -370,18 +368,11 @@ async fn save_cipher_from_data(
     data: &Value,
     d1: &worker::D1Database,
 ) -> Result<Cipher> {
-    let atype = data["type"]
-        .as_i64()
-        .ok_or_else(|| Error::bad_request("type is required"))? as i32;
-    let name = data["name"]
-        .as_str()
-        .ok_or_else(|| Error::bad_request("name is required"))?
-        .to_string();
+    let atype = data["type"].as_i64().ok_or_else(|| Error::bad_request("type is required"))? as i32;
+    let name = data["name"].as_str().ok_or_else(|| Error::bad_request("name is required"))?.to_string();
 
     let mut cipher = if let Some(uuid) = existing_uuid {
-        let mut c = Cipher::find_by_uuid(uuid, d1)
-            .await?
-            .ok_or_else(|| Error::not_found("Cipher not found"))?;
+        let mut c = Cipher::find_by_uuid(uuid, d1).await?.ok_or_else(|| Error::not_found("Cipher not found"))?;
         c.updated_at = util::now_utc();
         c.atype = atype;
         c.name = name;
@@ -394,10 +385,18 @@ async fn save_cipher_from_data(
 
     cipher.notes = data["notes"].as_str().map(|s| s.to_string());
     cipher.fields = data.get("fields").and_then(|f| {
-        if f.is_null() { None } else { Some(f.to_string()) }
+        if f.is_null() {
+            None
+        } else {
+            Some(f.to_string())
+        }
     });
     cipher.password_history = data.get("passwordHistory").and_then(|p| {
-        if p.is_null() { None } else { Some(p.to_string()) }
+        if p.is_null() {
+            None
+        } else {
+            Some(p.to_string())
+        }
     });
     cipher.reprompt = data["reprompt"].as_i64().map(|r| r as i32);
     cipher.akey = data["key"].as_str().map(|s| s.to_string());
@@ -409,7 +408,8 @@ async fn save_cipher_from_data(
                 d1,
                 "SELECT uuid FROM users_organizations WHERE user_uuid = ?1 AND org_uuid = ?2 AND status = 2",
                 &[crate::db::val(user_uuid), crate::db::val(org_id)],
-            ).await?;
+            )
+            .await?;
             if member.is_none() {
                 return Err(Error::bad_request("Not a confirmed member of this organization"));
             }
@@ -434,7 +434,5 @@ async fn save_cipher_from_data(
 }
 
 fn get_domain(env: &Env) -> String {
-    env.var("DOMAIN")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| "https://vaultwarden.example.com".to_string())
+    env.var("DOMAIN").map(|v| v.to_string()).unwrap_or_else(|_| "https://vaultwarden.example.com".to_string())
 }

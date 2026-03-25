@@ -197,32 +197,19 @@ impl User {
     }
 
     pub async fn find_by_email(email: &str, d1: &D1Database) -> Result<Option<User>> {
-        db::query_one(
-            d1,
-            "SELECT * FROM users WHERE email = ?1",
-            &[db::val(&email.to_lowercase())],
-        )
-        .await
+        db::query_one(d1, "SELECT * FROM users WHERE email = ?1", &[db::val(&email.to_lowercase())]).await
     }
 
     pub async fn delete(uuid: &str, d1: &D1Database) -> Result<()> {
         // Delete related records first
-        for table in &[
-            "folders_ciphers",
-            "favorites",
-            "ciphers_collections",
-        ] {
-            let query = format!(
-                "DELETE FROM {table} WHERE cipher_uuid IN (SELECT uuid FROM ciphers WHERE user_uuid = ?1)"
-            );
+        for table in &["folders_ciphers", "favorites", "ciphers_collections"] {
+            let query =
+                format!("DELETE FROM {table} WHERE cipher_uuid IN (SELECT uuid FROM ciphers WHERE user_uuid = ?1)");
             db::execute(d1, &query, &[db::val(uuid)]).await?;
         }
-        for table in &[
-            "attachments",
-        ] {
-            let query = format!(
-                "DELETE FROM {table} WHERE cipher_uuid IN (SELECT uuid FROM ciphers WHERE user_uuid = ?1)"
-            );
+        for table in &["attachments"] {
+            let query =
+                format!("DELETE FROM {table} WHERE cipher_uuid IN (SELECT uuid FROM ciphers WHERE user_uuid = ?1)");
             db::execute(d1, &query, &[db::val(uuid)]).await?;
         }
         // Delete invitations using a proper parameterized subquery
@@ -230,13 +217,25 @@ impl User {
             d1,
             "DELETE FROM invitations WHERE email IN (SELECT email FROM users WHERE uuid = ?1)",
             &[db::val(uuid)],
-        ).await?;
+        )
+        .await?;
         for table in &[
-            "ciphers", "folders", "devices", "twofactor", "sends",
-            "users_organizations", "users_collections", "emergency_access",
-            "auth_requests", "twofactor_incomplete",
+            "ciphers",
+            "folders",
+            "devices",
+            "twofactor",
+            "sends",
+            "users_organizations",
+            "users_collections",
+            "emergency_access",
+            "auth_requests",
+            "twofactor_incomplete",
         ] {
-            let col = if *table == "emergency_access" { "grantor_uuid" } else { "user_uuid" };
+            let col = if *table == "emergency_access" {
+                "grantor_uuid"
+            } else {
+                "user_uuid"
+            };
             let query = format!("DELETE FROM {table} WHERE {col} = ?1");
             let _ = db::execute(d1, &query, &[db::val(uuid)]).await;
         }

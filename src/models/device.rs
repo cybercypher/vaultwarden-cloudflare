@@ -123,29 +123,15 @@ impl Device {
     }
 
     pub async fn find_by_refresh_token(token: &str, d1: &D1Database) -> Result<Option<Device>> {
-        db::query_one(
-            d1,
-            "SELECT * FROM devices WHERE refresh_token = ?1",
-            &[db::val(token)],
-        )
-        .await
+        db::query_one(d1, "SELECT * FROM devices WHERE refresh_token = ?1", &[db::val(token)]).await
     }
 
     pub async fn find_by_user(user_uuid: &str, d1: &D1Database) -> Result<Vec<Device>> {
-        db::query_all(
-            d1,
-            "SELECT * FROM devices WHERE user_uuid = ?1",
-            &[db::val(user_uuid)],
-        )
-        .await
+        db::query_all(d1, "SELECT * FROM devices WHERE user_uuid = ?1", &[db::val(user_uuid)]).await
     }
 
     pub async fn delete_by_uuid_and_user(uuid: &str, user_uuid: &str, d1: &D1Database) -> Result<()> {
-        db::execute(
-            d1,
-            "DELETE FROM devices WHERE uuid = ?1 AND user_uuid = ?2",
-            &[db::val(uuid), db::val(user_uuid)],
-        )
-        .await
+        db::execute(d1, "DELETE FROM devices WHERE uuid = ?1 AND user_uuid = ?2", &[db::val(uuid), db::val(user_uuid)])
+            .await
     }
 }

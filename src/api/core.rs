@@ -16,10 +16,8 @@ pub fn now() -> Result<Response> {
 
 /// GET /api/config
 pub fn config(env: &Env) -> Result<Response> {
-    let domain = env
-        .var("DOMAIN")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| "https://vaultwarden.example.com".to_string());
+    let domain =
+        env.var("DOMAIN").map(|v| v.to_string()).unwrap_or_else(|_| "https://vaultwarden.example.com".to_string());
 
     let response = json!({
         "version": "2024.12.0",
@@ -76,7 +74,8 @@ pub async fn put_eq_domains(mut req: worker::Request, env: &Env) -> Result<Respo
             crate::db::val(&crate::util::now_utc()),
             crate::db::val(&claims.sub),
         ],
-    ).await?;
+    )
+    .await?;
 
     let response = json!({
         "equivalentDomains": eq_domains,

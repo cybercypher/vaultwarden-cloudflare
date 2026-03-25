@@ -48,24 +48,12 @@ impl Cipher {
 
     /// Convert cipher to Bitwarden API JSON response.
     /// `folder_id` and `favorite` are looked up separately per-user.
-    pub fn to_json(
-        &self,
-        folder_id: Option<&str>,
-        favorite: bool,
-        attachments: &[Value],
-    ) -> Value {
+    pub fn to_json(&self, folder_id: Option<&str>, favorite: bool, attachments: &[Value]) -> Value {
         // Parse the stored data JSON
         let data: Value = serde_json::from_str(&self.data).unwrap_or(Value::Null);
-        let fields: Value = self
-            .fields
-            .as_ref()
-            .and_then(|f| serde_json::from_str(f).ok())
-            .unwrap_or(Value::Null);
-        let password_history: Value = self
-            .password_history
-            .as_ref()
-            .and_then(|p| serde_json::from_str(p).ok())
-            .unwrap_or(Value::Null);
+        let fields: Value = self.fields.as_ref().and_then(|f| serde_json::from_str(f).ok()).unwrap_or(Value::Null);
+        let password_history: Value =
+            self.password_history.as_ref().and_then(|p| serde_json::from_str(p).ok()).unwrap_or(Value::Null);
 
         let mut json = serde_json::json!({
             "id": self.uuid,
@@ -226,7 +214,8 @@ impl Cipher {
                 d1,
                 "SELECT uuid FROM users_organizations WHERE user_uuid = ?1 AND org_uuid = ?2 AND status = 2",
                 &[crate::db::val(user_uuid), crate::db::val(org_uuid)],
-            ).await?;
+            )
+            .await?;
             return Ok(member.is_some());
         }
         Ok(false)

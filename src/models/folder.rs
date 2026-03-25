@@ -69,12 +69,7 @@ impl Folder {
     }
 
     pub async fn find_by_user(user_uuid: &str, d1: &D1Database) -> Result<Vec<Folder>> {
-        db::query_all(
-            d1,
-            "SELECT * FROM folders WHERE user_uuid = ?1",
-            &[db::val(user_uuid)],
-        )
-        .await
+        db::query_all(d1, "SELECT * FROM folders WHERE user_uuid = ?1", &[db::val(user_uuid)]).await
     }
 
     pub async fn delete(uuid: &str, d1: &D1Database) -> Result<()> {
@@ -103,12 +98,7 @@ impl FolderCipher {
     }
 
     pub async fn delete_all_for_cipher(cipher_uuid: &str, d1: &D1Database) -> Result<()> {
-        db::execute(
-            d1,
-            "DELETE FROM folders_ciphers WHERE cipher_uuid = ?1",
-            &[db::val(cipher_uuid)],
-        )
-        .await
+        db::execute(d1, "DELETE FROM folders_ciphers WHERE cipher_uuid = ?1", &[db::val(cipher_uuid)]).await
     }
 
     pub async fn find_folder_for_cipher(cipher_uuid: &str, user_uuid: &str, d1: &D1Database) -> Result<Option<String>> {

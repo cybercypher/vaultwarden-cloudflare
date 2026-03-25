@@ -16,26 +16,19 @@ use serde_json::{json, Value};
 use worker::*;
 
 fn add_cors_headers(resp: &mut Response, env: &Env) {
-    let allowed_origin = env
-        .var("CORS_ALLOWED_ORIGIN")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| {
-            // Default to configured DOMAIN if no explicit CORS origin set
-            env.var("DOMAIN").map(|v| v.to_string()).unwrap_or_else(|_| "*".to_string())
-        });
+    let allowed_origin = env.var("CORS_ALLOWED_ORIGIN").map(|v| v.to_string()).unwrap_or_else(|_| {
+        // Default to configured DOMAIN if no explicit CORS origin set
+        env.var("DOMAIN").map(|v| v.to_string()).unwrap_or_else(|_| "*".to_string())
+    });
     let headers = resp.headers_mut();
     let _ = headers.set("Access-Control-Allow-Origin", &allowed_origin);
-    let _ = headers.set(
-        "Access-Control-Allow-Methods",
-        "GET, POST, PUT, DELETE, OPTIONS, PATCH",
-    );
+    let _ = headers.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
     let _ = headers.set(
         "Access-Control-Allow-Headers",
         "Content-Type, Authorization, Accept, Device-Type, Bitwarden-Client-Name, Bitwarden-Client-Version, Auth-Email",
     );
     let _ = headers.set("Access-Control-Max-Age", "86400");
 }
-
 
 /// Helper to extract a path segment by position (0-indexed after the base path).
 fn path_segment(path: &str, base: &str, index: usize) -> Option<String> {
@@ -70,13 +63,7 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     Ok(resp)
 }
 
-async fn route(
-    req: Request,
-    env: &Env,
-    path: &str,
-    method: Method,
-    url: &worker::Url,
-) -> error::Result<Response> {
+async fn route(req: Request, env: &Env, path: &str, method: Method, url: &worker::Url) -> error::Result<Response> {
     // =========================================================================
     // Identity routes (/identity/...)
     // =========================================================================
@@ -96,7 +83,9 @@ async fn route(
         return api::identity::register(req, env).await;
     }
     // SSO routes
-    if (path == "/identity/connect/authorize" || path.starts_with("/identity/connect/authorize?")) && method == Method::Get {
+    if (path == "/identity/connect/authorize" || path.starts_with("/identity/connect/authorize?"))
+        && method == Method::Get
+    {
         return api::sso::authorize(req, env).await;
     }
     if path.starts_with("/identity/connect/oidc-signin") && method == Method::Get {
@@ -111,9 +100,7 @@ async fn route(
     // =========================================================================
     if (path == "/notifications/hub" || path == "/notifications/hub/") && method == Method::Get {
         // Extract access_token from query string
-        let token = url.query_pairs()
-            .find(|(k, _)| k == "access_token")
-            .map(|(_, v)| v.to_string());
+        let token = url.query_pairs().find(|(k, _)| k == "access_token").map(|(_, v)| v.to_string());
 
         if let Some(token) = token {
             let domain = env.var("DOMAIN").map(|v| v.to_string()).unwrap_or_default();
@@ -121,17 +108,19 @@ async fn route(
                 .map_err(|_| error::Error::unauthorized("Invalid access token"))?;
 
             // Forward to the user's Durable Object for WebSocket handling
-            let namespace = env.durable_object("NOTIFICATION_HUB")
+            let namespace = env
+                .durable_object("NOTIFICATION_HUB")
                 .map_err(|e| error::Error::internal(format!("DO binding error: {e}")))?;
-            let id = namespace.id_from_name(&claims.sub)
-                .map_err(|e| error::Error::internal(format!("DO id error: {e}")))?;
-            let stub = id.get_stub()
-                .map_err(|e| error::Error::internal(format!("DO stub error: {e}")))?;
+            let id =
+                namespace.id_from_name(&claims.sub).map_err(|e| error::Error::internal(format!("DO id error: {e}")))?;
+            let stub = id.get_stub().map_err(|e| error::Error::internal(format!("DO stub error: {e}")))?;
 
             let do_req = Request::new(&format!("https://do-internal/ws"), Method::Get)
                 .map_err(|e| error::Error::internal(format!("DO request error: {e}")))?;
 
-            let resp = stub.fetch_with_request(do_req).await
+            let resp = stub
+                .fetch_with_request(do_req)
+                .await
                 .map_err(|e| error::Error::internal(format!("DO fetch error: {e}")))?;
 
             return Ok(resp);
@@ -601,14 +590,26 @@ async fn route(
                 let sub = path_segment(path, "/api/emergency-access/", 1);
                 match sub.as_deref() {
                     Some("accept") if method == Method::Post => return api::emergency::accept(req, env, &ea_id).await,
-                    Some("confirm") if method == Method::Post => return api::emergency::confirm(req, env, &ea_id).await,
-                    Some("initiate") if method == Method::Post => return api::emergency::initiate(req, env, &ea_id).await,
-                    Some("approve") if method == Method::Post => return api::emergency::approve(req, env, &ea_id).await,
+                    Some("confirm") if method == Method::Post => {
+                        return api::emergency::confirm(req, env, &ea_id).await
+                    }
+                    Some("initiate") if method == Method::Post => {
+                        return api::emergency::initiate(req, env, &ea_id).await
+                    }
+                    Some("approve") if method == Method::Post => {
+                        return api::emergency::approve(req, env, &ea_id).await
+                    }
                     Some("reject") if method == Method::Post => return api::emergency::reject(req, env, &ea_id).await,
                     Some("view") if method == Method::Post => return api::emergency::view(req, env, &ea_id).await,
-                    Some("takeover") if method == Method::Post => return api::emergency::takeover(req, env, &ea_id).await,
-                    Some("delete") if method == Method::Post => return api::emergency::delete_ea(req, env, &ea_id).await,
-                    Some("policies") if method == Method::Get => return api::emergency::policies(req, env, &ea_id).await,
+                    Some("takeover") if method == Method::Post => {
+                        return api::emergency::takeover(req, env, &ea_id).await
+                    }
+                    Some("delete") if method == Method::Post => {
+                        return api::emergency::delete_ea(req, env, &ea_id).await
+                    }
+                    Some("policies") if method == Method::Get => {
+                        return api::emergency::policies(req, env, &ea_id).await
+                    }
                     None if method == Method::Delete => return api::emergency::delete_ea(req, env, &ea_id).await,
                     _ => {}
                 }
@@ -674,7 +675,8 @@ async fn route(
                     &d1,
                     "UPDATE users SET verified_at = ?1 WHERE uuid = ?2",
                     &[db::val(&util::now_utc()), db::val(&claims.sub)],
-                ).await;
+                )
+                .await;
             }
         }
         return Response::ok("").map_err(|e| error::Error::internal(e.to_string()));
@@ -689,7 +691,8 @@ async fn route(
                     &d1,
                     "UPDATE users SET verified_at = ?1 WHERE uuid = ?2",
                     &[db::val(&util::now_utc()), db::val(&claims.sub)],
-                ).await;
+                )
+                .await;
             }
         }
         return Response::ok("").map_err(|e| error::Error::internal(e.to_string()));
@@ -798,14 +801,25 @@ async fn route(
             if user_id != "overview" && user_id != "by-mail" && user_id != "update_revision" && user_id != "org_type" {
                 let sub = path_segment(path, "/admin/users/", 1);
                 match sub.as_deref() {
-                    Some("delete") if method == Method::Post => return api::admin::delete_user(req, env, &user_id).await,
-                    Some("disable") if method == Method::Post => return api::admin::disable_user(req, env, &user_id).await,
-                    Some("enable") if method == Method::Post => return api::admin::enable_user(req, env, &user_id).await,
-                    Some("deauth") if method == Method::Post => return api::admin::deauth_user(req, env, &user_id).await,
-                    Some("remove-2fa") if method == Method::Post => return api::admin::remove_2fa(req, env, &user_id).await,
+                    Some("delete") if method == Method::Post => {
+                        return api::admin::delete_user(req, env, &user_id).await
+                    }
+                    Some("disable") if method == Method::Post => {
+                        return api::admin::disable_user(req, env, &user_id).await
+                    }
+                    Some("enable") if method == Method::Post => {
+                        return api::admin::enable_user(req, env, &user_id).await
+                    }
+                    Some("deauth") if method == Method::Post => {
+                        return api::admin::deauth_user(req, env, &user_id).await
+                    }
+                    Some("remove-2fa") if method == Method::Post => {
+                        return api::admin::remove_2fa(req, env, &user_id).await
+                    }
                     Some("sso") if method == Method::Delete => return api::admin::delete_sso(req, env, &user_id).await,
                     Some("invite") => {
-                        if path_segment(path, "/admin/users/", 2).as_deref() == Some("resend") && method == Method::Post {
+                        if path_segment(path, "/admin/users/", 2).as_deref() == Some("resend") && method == Method::Post
+                        {
                             return api::admin::resend_invite(req, env, &user_id).await;
                         }
                     }
@@ -830,12 +844,7 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
         let now = util::now_utc();
 
         // Purge sends past deletion date
-        let _ = db::execute(
-            &d1,
-            "DELETE FROM sends WHERE deletion_date < ?1",
-            &[db::val(&now)],
-        )
-        .await;
+        let _ = db::execute(&d1, "DELETE FROM sends WHERE deletion_date < ?1", &[db::val(&now)]).await;
 
         // Purge trashed ciphers older than 30 days
         let thirty_days_ago = chrono::Utc::now()

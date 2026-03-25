@@ -34,23 +34,14 @@ pub enum UpdateType {
 }
 
 /// Create a SignalR MessagePack notification payload.
-pub fn create_update(
-    ut: UpdateType,
-    payload: Vec<(MpValue, MpValue)>,
-    acting_device_id: Option<&str>,
-) -> Vec<u8> {
+pub fn create_update(ut: UpdateType, payload: Vec<(MpValue, MpValue)>, acting_device_id: Option<&str>) -> Vec<u8> {
     let value = MpValue::Array(vec![
         1.into(),
         MpValue::Map(vec![]),
         MpValue::Nil,
         "ReceiveMessage".into(),
         MpValue::Array(vec![MpValue::Map(vec![
-            (
-                "ContextId".into(),
-                acting_device_id
-                    .map(|v| MpValue::String(v.into()))
-                    .unwrap_or(MpValue::Nil),
-            ),
+            ("ContextId".into(), acting_device_id.map(|v| MpValue::String(v.into())).unwrap_or(MpValue::Nil)),
             ("Type".into(), (ut as i32).into()),
             ("Payload".into(), MpValue::Map(payload)),
         ])]),
@@ -83,7 +74,12 @@ fn serialize_msgpack(val: &MpValue) -> Vec<u8> {
 }
 
 /// Build payload for cipher updates
-pub fn cipher_update_payload(cipher_id: &str, user_id: &str, org_id: Option<&str>, revision_date: &str) -> Vec<(MpValue, MpValue)> {
+pub fn cipher_update_payload(
+    cipher_id: &str,
+    user_id: &str,
+    org_id: Option<&str>,
+    revision_date: &str,
+) -> Vec<(MpValue, MpValue)> {
     let mut payload = vec![
         ("Id".into(), MpValue::String(cipher_id.into())),
         ("UserId".into(), MpValue::String(user_id.into())),
@@ -108,10 +104,7 @@ pub fn folder_update_payload(folder_id: &str, user_id: &str, revision_date: &str
 
 /// Build payload for user-level updates (logout, settings, etc.)
 pub fn user_update_payload(user_id: &str, _date: &str) -> Vec<(MpValue, MpValue)> {
-    vec![
-        ("UserId".into(), MpValue::String(user_id.into())),
-        ("Date".into(), MpValue::String(_date.into())),
-    ]
+    vec![("UserId".into(), MpValue::String(user_id.into())), ("Date".into(), MpValue::String(_date.into()))]
 }
 
 // =============================================================================
@@ -128,7 +121,10 @@ pub struct NotificationHub {
 
 impl DurableObject for NotificationHub {
     fn new(state: State, env: Env) -> Self {
-        Self { state, env }
+        Self {
+            state,
+            env,
+        }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -193,11 +189,7 @@ impl DurableObject for NotificationHub {
 // =============================================================================
 
 /// Send a push notification to a specific user by forwarding to their Durable Object.
-pub async fn send_notification(
-    env: &Env,
-    user_uuid: &str,
-    message: &[u8],
-) -> crate::error::Result<()> {
+pub async fn send_notification(env: &Env, user_uuid: &str, message: &[u8]) -> crate::error::Result<()> {
     let namespace = env
         .durable_object("NOTIFICATION_HUB")
         .map_err(|e| crate::error::Error::internal(format!("DO binding error: {e}")))?;
@@ -212,11 +204,8 @@ pub async fn send_notification(
     init.with_method(Method::Post);
     init.with_body(Some(wasm_bindgen::JsValue::from(js_sys::Uint8Array::from(message))));
 
-    let req = Request::new_with_init(
-        &format!("https://do-internal/notify"),
-        &init,
-    )
-    .map_err(|e| crate::error::Error::internal(format!("DO request error: {e}")))?;
+    let req = Request::new_with_init(&format!("https://do-internal/notify"), &init)
+        .map_err(|e| crate::error::Error::internal(format!("DO request error: {e}")))?;
 
     let _ = stub.fetch_with_request(req).await;
     Ok(())
@@ -240,15 +229,23 @@ pub async fn notify_cipher_update(
     if let Some(oid) = org_id {
         if let Ok(d1) = env.d1("DB") {
             #[derive(serde::Deserialize)]
-            struct Member { user_uuid: String }
+            struct Member {
+                user_uuid: String,
+            }
             if let Ok(members) = crate::db::query_all::<Member>(
                 &d1,
                 "SELECT user_uuid FROM users_organizations WHERE org_uuid = ?1 AND status = 2",
                 &[crate::db::val(oid)],
-            ).await {
+            )
+            .await
+            {
                 for m in members {
                     if m.user_uuid != user_id {
-                        let msg = create_update(ut, cipher_update_payload(cipher_id, &m.user_uuid, Some(oid), &now), acting_device_id);
+                        let msg = create_update(
+                            ut,
+                            cipher_update_payload(cipher_id, &m.user_uuid, Some(oid), &now),
+                            acting_device_id,
+                        );
                         let _ = send_notification(env, &m.user_uuid, &msg).await;
                     }
                 }

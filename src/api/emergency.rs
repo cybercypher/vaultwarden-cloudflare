@@ -31,7 +31,13 @@ struct EmergencyAccess {
     created_at: String,
 }
 
-fn ea_to_json(ea: &EmergencyAccess, grantor_name: &str, grantor_email: &str, grantee_name: &str, grantee_email: &str) -> Value {
+fn ea_to_json(
+    ea: &EmergencyAccess,
+    grantor_name: &str,
+    grantor_email: &str,
+    grantee_name: &str,
+    grantee_email: &str,
+) -> Value {
     json!({
         "id": ea.uuid,
         "grantorId": ea.grantor_uuid,
@@ -53,9 +59,8 @@ pub async fn get_contacts(req: Request, env: &Env) -> Result<Response> {
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let eas: Vec<EmergencyAccess> = db::query_all(
-        &d1, "SELECT * FROM emergency_access WHERE grantor_uuid = ?1", &[db::val(&claims.sub)],
-    ).await?;
+    let eas: Vec<EmergencyAccess> =
+        db::query_all(&d1, "SELECT * FROM emergency_access WHERE grantor_uuid = ?1", &[db::val(&claims.sub)]).await?;
 
     let mut list = Vec::new();
     for ea in &eas {
@@ -72,9 +77,8 @@ pub async fn get_grantees(req: Request, env: &Env) -> Result<Response> {
     let claims = auth::get_auth_user(&req, &domain, env)?;
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
-    let eas: Vec<EmergencyAccess> = db::query_all(
-        &d1, "SELECT * FROM emergency_access WHERE grantee_uuid = ?1", &[db::val(&claims.sub)],
-    ).await?;
+    let eas: Vec<EmergencyAccess> =
+        db::query_all(&d1, "SELECT * FROM emergency_access WHERE grantee_uuid = ?1", &[db::val(&claims.sub)]).await?;
 
     let mut list = Vec::new();
     for ea in &eas {
@@ -110,7 +114,8 @@ pub async fn invite(mut req: Request, env: &Env) -> Result<Response> {
     let body: Value = req.json().await.map_err(|e| Error::bad_request(e.to_string()))?;
     let email = body["email"].as_str().ok_or_else(|| Error::bad_request("email required"))?.to_lowercase();
     let atype = body["type"].as_i64().ok_or_else(|| Error::bad_request("type required"))? as i32;
-    let wait_time_days = body["waitTimeDays"].as_i64().ok_or_else(|| Error::bad_request("waitTimeDays required"))? as i32;
+    let wait_time_days =
+        body["waitTimeDays"].as_i64().ok_or_else(|| Error::bad_request("waitTimeDays required"))? as i32;
 
     let grantee = crate::models::User::find_by_email(&email, &d1).await?;
     let now = util::now_utc();
@@ -141,8 +146,15 @@ pub async fn accept(mut req: Request, env: &Env, ea_id: &str) -> Result<Response
     db::execute(
         &d1,
         "UPDATE emergency_access SET grantee_uuid = ?1, status = ?2, updated_at = ?3 WHERE uuid = ?4 AND status = ?5",
-        &[db::val(&claims.sub), db::val_i32(EA_ACCEPTED), db::val(&util::now_utc()), db::val(ea_id), db::val_i32(EA_INVITED)],
-    ).await?;
+        &[
+            db::val(&claims.sub),
+            db::val_i32(EA_ACCEPTED),
+            db::val(&util::now_utc()),
+            db::val(ea_id),
+            db::val_i32(EA_INVITED),
+        ],
+    )
+    .await?;
 
     Response::ok("").map_err(|e| Error::internal(e.to_string()))
 }
@@ -218,9 +230,12 @@ pub async fn view(req: Request, env: &Env, ea_id: &str) -> Result<Response> {
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
     let ea: EmergencyAccess = db::query_one(
-        &d1, "SELECT * FROM emergency_access WHERE uuid = ?1 AND grantee_uuid = ?2 AND status = ?3",
+        &d1,
+        "SELECT * FROM emergency_access WHERE uuid = ?1 AND grantee_uuid = ?2 AND status = ?3",
         &[db::val(ea_id), db::val(&claims.sub), db::val_i32(EA_RECOVERY_APPROVED)],
-    ).await?.ok_or_else(|| Error::not_found("Emergency access not found or not approved"))?;
+    )
+    .await?
+    .ok_or_else(|| Error::not_found("Emergency access not found or not approved"))?;
 
     // Return grantor's ciphers
     let ciphers = crate::models::Cipher::find_by_user(&ea.grantor_uuid, &d1).await?;
@@ -241,9 +256,12 @@ pub async fn takeover(req: Request, env: &Env, ea_id: &str) -> Result<Response> 
     let d1 = env.d1("DB").map_err(|e| Error::internal(e.to_string()))?;
 
     let ea: EmergencyAccess = db::query_one(
-        &d1, "SELECT * FROM emergency_access WHERE uuid = ?1 AND grantee_uuid = ?2 AND status = ?3 AND atype = ?4",
+        &d1,
+        "SELECT * FROM emergency_access WHERE uuid = ?1 AND grantee_uuid = ?2 AND status = ?3 AND atype = ?4",
         &[db::val(ea_id), db::val(&claims.sub), db::val_i32(EA_RECOVERY_APPROVED), db::val_i32(EA_TYPE_TAKEOVER)],
-    ).await?.ok_or_else(|| Error::not_found("Emergency access not found or not approved for takeover"))?;
+    )
+    .await?
+    .ok_or_else(|| Error::not_found("Emergency access not found or not approved for takeover"))?;
 
     let grantor = crate::models::User::find_by_uuid(&ea.grantor_uuid, &d1)
         .await?
@@ -270,7 +288,8 @@ pub async fn delete_ea(req: Request, env: &Env, ea_id: &str) -> Result<Response>
         &d1,
         "DELETE FROM emergency_access WHERE uuid = ?1 AND (grantor_uuid = ?2 OR grantee_uuid = ?2)",
         &[db::val(ea_id), db::val(&claims.sub)],
-    ).await?;
+    )
+    .await?;
 
     Response::ok("").map_err(|e| Error::internal(e.to_string()))
 }

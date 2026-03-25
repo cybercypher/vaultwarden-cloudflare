@@ -23,43 +23,27 @@ use crate::error::{Error, Result};
 
 /// Check if email sending is enabled.
 pub fn is_enabled(env: &Env) -> bool {
-    env.var("MAIL_ENABLED")
-        .map(|v| v.to_string() == "true")
-        .unwrap_or(false)
+    env.var("MAIL_ENABLED").map(|v| v.to_string() == "true").unwrap_or(false)
 }
 
 fn get_from(env: &Env) -> String {
-    env.var("MAIL_FROM")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| "vaultwarden@example.com".to_string())
+    env.var("MAIL_FROM").map(|v| v.to_string()).unwrap_or_else(|_| "vaultwarden@example.com".to_string())
 }
 
 fn get_from_name(env: &Env) -> String {
-    env.var("MAIL_FROM_NAME")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| "Vaultwarden".to_string())
+    env.var("MAIL_FROM_NAME").map(|v| v.to_string()).unwrap_or_else(|_| "Vaultwarden".to_string())
 }
 
 fn get_backend(env: &Env) -> String {
-    env.var("MAIL_BACKEND")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| "cloudflare".to_string())
+    env.var("MAIL_BACKEND").map(|v| v.to_string()).unwrap_or_else(|_| "cloudflare".to_string())
 }
 
 fn get_domain(env: &Env) -> String {
-    env.var("DOMAIN")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| "https://vaultwarden.example.com".to_string())
+    env.var("DOMAIN").map(|v| v.to_string()).unwrap_or_else(|_| "https://vaultwarden.example.com".to_string())
 }
 
 /// Send an email. Dispatches to the configured backend.
-pub async fn send_email(
-    env: &Env,
-    to: &str,
-    subject: &str,
-    body_html: &str,
-    body_text: &str,
-) -> Result<()> {
+pub async fn send_email(env: &Env, to: &str, subject: &str, body_html: &str, body_text: &str) -> Result<()> {
     if !is_enabled(env) {
         return Ok(()); // Silently skip if email not configured
     }
@@ -86,13 +70,7 @@ pub async fn send_email(
 /// [[send_email]]
 /// name = "SEND_EMAIL"
 /// ```
-async fn send_via_cloudflare(
-    env: &Env,
-    to: &str,
-    subject: &str,
-    body_html: &str,
-    body_text: &str,
-) -> Result<()> {
+async fn send_via_cloudflare(env: &Env, to: &str, subject: &str, body_html: &str, body_text: &str) -> Result<()> {
     let from = get_from(env);
     let from_name = get_from_name(env);
 
@@ -109,12 +87,7 @@ async fn send_via_cloudflare(
 }
 
 /// Call the Cloudflare send_email binding via JS interop.
-async fn send_email_via_binding(
-    env: &Env,
-    mime_message: &str,
-    from: &str,
-    to: &str,
-) -> Result<()> {
+async fn send_email_via_binding(env: &Env, mime_message: &str, from: &str, to: &str) -> Result<()> {
     // The send_email binding is accessed through the environment
     // We use wasm-bindgen to call the JS API
     let js_env: &JsValue = env.as_ref();
@@ -123,9 +96,7 @@ async fn send_email_via_binding(
         .map_err(|_| Error::internal("SEND_EMAIL binding not found. Add [[send_email]] to wrangler.toml"))?;
 
     if send_email_binding.is_undefined() || send_email_binding.is_null() {
-        return Err(Error::internal(
-            "SEND_EMAIL binding not configured. Add [[send_email]] to wrangler.toml",
-        ));
+        return Err(Error::internal("SEND_EMAIL binding not configured. Add [[send_email]] to wrangler.toml"));
     }
 
     // Create EmailMessage object
@@ -135,17 +106,13 @@ async fn send_email_via_binding(
     let send_fn = js_sys::Reflect::get(&send_email_binding, &JsValue::from_str("send"))
         .map_err(|_| Error::internal("send_email binding has no send method"))?;
 
-    let send_fn: js_sys::Function = send_fn
-        .dyn_into()
-        .map_err(|_| Error::internal("send is not a function"))?;
+    let send_fn: js_sys::Function = send_fn.dyn_into().map_err(|_| Error::internal("send is not a function"))?;
 
     let promise = send_fn
         .call1(&send_email_binding, &email_msg)
         .map_err(|e| Error::internal(format!("Email send failed: {e:?}")))?;
 
-    let promise: js_sys::Promise = promise
-        .dyn_into()
-        .map_err(|_| Error::internal("send did not return a promise"))?;
+    let promise: js_sys::Promise = promise.dyn_into().map_err(|_| Error::internal("send did not return a promise"))?;
 
     wasm_bindgen_futures::JsFuture::from(promise)
         .await
@@ -157,10 +124,8 @@ async fn send_email_via_binding(
 fn create_email_message(from: &str, to: &str, mime_content: &str) -> Result<JsValue> {
     // Create a JS object representing the email
     let msg = js_sys::Object::new();
-    js_sys::Reflect::set(&msg, &"from".into(), &from.into())
-        .map_err(|_| Error::internal("Failed to set from"))?;
-    js_sys::Reflect::set(&msg, &"to".into(), &to.into())
-        .map_err(|_| Error::internal("Failed to set to"))?;
+    js_sys::Reflect::set(&msg, &"from".into(), &from.into()).map_err(|_| Error::internal("Failed to set from"))?;
+    js_sys::Reflect::set(&msg, &"to".into(), &to.into()).map_err(|_| Error::internal("Failed to set to"))?;
 
     // Create raw MIME content as Uint8Array
     let content = mime_content.as_bytes();
@@ -178,13 +143,7 @@ fn create_email_message(from: &str, to: &str, mime_content: &str) -> Result<JsVa
 // =============================================================================
 
 /// Send email via Resend (https://resend.com) - 100 emails/day free tier
-async fn send_via_resend(
-    env: &Env,
-    to: &str,
-    subject: &str,
-    body_html: &str,
-    _body_text: &str,
-) -> Result<()> {
+async fn send_via_resend(env: &Env, to: &str, subject: &str, body_html: &str, _body_text: &str) -> Result<()> {
     let api_key = env
         .secret("MAIL_API_KEY")
         .map_err(|_| Error::internal("MAIL_API_KEY secret not set for Resend backend"))?
@@ -211,29 +170,18 @@ async fn send_via_resend(
     let request = worker::Request::new_with_init("https://api.resend.com/emails", &init)
         .map_err(|e| Error::internal(format!("Failed to create request: {e}")))?;
 
-    let resp = worker::Fetch::Request(request)
-        .send()
-        .await
-        .map_err(|e| Error::internal(format!("Resend API error: {e}")))?;
+    let resp =
+        worker::Fetch::Request(request).send().await.map_err(|e| Error::internal(format!("Resend API error: {e}")))?;
 
     if resp.status_code() >= 400 {
-        return Err(Error::internal(format!(
-            "Resend API returned status {}",
-            resp.status_code()
-        )));
+        return Err(Error::internal(format!("Resend API returned status {}", resp.status_code())));
     }
 
     Ok(())
 }
 
 /// Send email via SendGrid (https://sendgrid.com) - 100 emails/day free tier
-async fn send_via_sendgrid(
-    env: &Env,
-    to: &str,
-    subject: &str,
-    body_html: &str,
-    body_text: &str,
-) -> Result<()> {
+async fn send_via_sendgrid(env: &Env, to: &str, subject: &str, body_html: &str, body_text: &str) -> Result<()> {
     let api_key = env
         .secret("MAIL_API_KEY")
         .map_err(|_| Error::internal("MAIL_API_KEY secret not set for SendGrid backend"))?
@@ -274,23 +222,14 @@ async fn send_via_sendgrid(
         .map_err(|e| Error::internal(format!("SendGrid API error: {e}")))?;
 
     if resp.status_code() >= 400 {
-        return Err(Error::internal(format!(
-            "SendGrid API returned status {}",
-            resp.status_code()
-        )));
+        return Err(Error::internal(format!("SendGrid API returned status {}", resp.status_code())));
     }
 
     Ok(())
 }
 
 /// Send email via Mailgun (https://mailgun.com) - 100 emails/day for 3 months free
-async fn send_via_mailgun(
-    env: &Env,
-    to: &str,
-    subject: &str,
-    body_html: &str,
-    body_text: &str,
-) -> Result<()> {
+async fn send_via_mailgun(env: &Env, to: &str, subject: &str, body_html: &str, body_text: &str) -> Result<()> {
     let api_key = env
         .secret("MAIL_API_KEY")
         .map_err(|_| Error::internal("MAIL_API_KEY secret not set for Mailgun backend"))?
@@ -326,16 +265,11 @@ async fn send_via_mailgun(
     let request = worker::Request::new_with_init(&url, &init)
         .map_err(|e| Error::internal(format!("Failed to create request: {e}")))?;
 
-    let resp = worker::Fetch::Request(request)
-        .send()
-        .await
-        .map_err(|e| Error::internal(format!("Mailgun API error: {e}")))?;
+    let resp =
+        worker::Fetch::Request(request).send().await.map_err(|e| Error::internal(format!("Mailgun API error: {e}")))?;
 
     if resp.status_code() >= 400 {
-        return Err(Error::internal(format!(
-            "Mailgun API returned status {}",
-            resp.status_code()
-        )));
+        return Err(Error::internal(format!("Mailgun API returned status {}", resp.status_code())));
     }
 
     Ok(())
