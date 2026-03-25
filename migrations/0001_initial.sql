@@ -276,6 +276,11 @@ CREATE TABLE IF NOT EXISTS organization_api_key (
     PRIMARY KEY (uuid, org_uuid)
 );
 
+-- Invitations (admin-invited emails allowed to register when signups are off)
+CREATE TABLE IF NOT EXISTS invitations (
+    email TEXT NOT NULL PRIMARY KEY
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_devices_user_uuid ON devices(user_uuid);

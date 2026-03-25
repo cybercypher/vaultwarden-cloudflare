@@ -73,8 +73,17 @@ collect_config() {
   askd "Domain (your worker URL, e.g. https://vaultwarden.you.workers.dev)" "https://${WORKER_NAME}.$(npx wrangler whoami 2>/dev/null | grep -oP '\w+\.workers\.dev' || echo 'YOUR_SUBDOMAIN.workers.dev')"
   DOMAIN="$REPLY"
 
-  askd "Allow new user signups? (true/false)" "true"
-  SIGNUPS_ALLOWED="$REPLY"
+  echo ""
+  echo -e "  Signup modes:"
+  echo -e "    ${BOLD}open${NC}        — anyone can create an account"
+  echo -e "    ${BOLD}invite-only${NC} — only admin-invited emails can register"
+  echo ""
+  askd "Signup mode (open/invite-only)" "invite-only"
+  if [ "$REPLY" = "open" ]; then
+    SIGNUPS_ALLOWED="true"
+  else
+    SIGNUPS_ALLOWED="false"
+  fi
 
   echo ""
   echo -e "${BOLD}── Email Configuration ──${NC}"

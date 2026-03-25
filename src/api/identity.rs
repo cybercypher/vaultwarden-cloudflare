@@ -354,8 +354,17 @@ pub async fn register(mut req: Request, env: &Env) -> Result<Response> {
         .map(|v| v.to_string() == "true")
         .unwrap_or(true);
 
+    // If signups are disabled, check for an admin invitation
     if !signups_allowed {
-        return Err(Error::bad_request("Registration is not allowed."));
+        let email_check = body["email"].as_str().unwrap_or("").to_lowercase();
+        #[derive(serde::Deserialize)]
+        struct Inv { email: String }
+        let invite: Option<Inv> = crate::db::query_one(
+            &d1, "SELECT email FROM invitations WHERE email = ?1", &[crate::db::val(&email_check)],
+        ).await?;
+        if invite.is_none() {
+            return Err(Error::bad_request("Registration is not allowed."));
+        }
     }
 
     let email = body["email"]
@@ -422,6 +431,9 @@ pub async fn register(mut req: Request, env: &Env) -> Result<Response> {
     }
 
     user.save(&d1).await?;
+
+    // Remove invitation if one existed (user has now registered)
+    let _ = crate::db::execute(&d1, "DELETE FROM invitations WHERE email = ?1", &[crate::db::val(&user.email)]).await;
 
     // Send welcome email if mail is configured
     let _ = crate::mail::send_welcome(env, &user.email).await;
