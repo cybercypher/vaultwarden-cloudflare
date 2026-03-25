@@ -1,146 +1,233 @@
-![Vaultwarden Logo](./resources/vaultwarden-logo-auto.svg)
+# Vaultwarden on Cloudflare Workers
 
-An alternative server implementation of the Bitwarden Client API, written in Rust and compatible with [official Bitwarden clients](https://bitwarden.com/download/) [[disclaimer](#disclaimer)], perfect for self-hosted deployment where running the official resource-heavy service might not be ideal.
+A complete port of [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (alternative Bitwarden server) to run entirely on Cloudflare's free-tier infrastructure.
 
----
+**30 Rust source files | 7,624 lines | 120 API routes | 146 E2E tests | 2.0 MB WASM binary**
 
-[![GitHub Release](https://img.shields.io/github/release/dani-garcia/vaultwarden.svg?style=for-the-badge&logo=vaultwarden&color=005AA4)](https://github.com/dani-garcia/vaultwarden/releases/latest)
-[![ghcr.io Pulls](https://img.shields.io/badge/dynamic/json?style=for-the-badge&logo=github&logoColor=fff&color=005AA4&url=https%3A%2F%2Fipitio.github.io%2Fbackage%2Fdani-garcia%2Fvaultwarden%2Fvaultwarden.json&query=%24.downloads&label=ghcr.io%20pulls&cacheSeconds=14400)](https://github.com/dani-garcia/vaultwarden/pkgs/container/vaultwarden)
-[![Docker Pulls](https://img.shields.io/docker/pulls/vaultwarden/server.svg?style=for-the-badge&logo=docker&logoColor=fff&color=005AA4&label=docker.io%20pulls)](https://hub.docker.com/r/vaultwarden/server)
-[![Quay.io](https://img.shields.io/badge/quay.io-download-005AA4?style=for-the-badge&logo=redhat&cacheSeconds=14400)](https://quay.io/repository/vaultwarden/server) <br>
-[![Contributors](https://img.shields.io/github/contributors-anon/dani-garcia/vaultwarden.svg?style=flat-square&logo=vaultwarden&color=005AA4)](https://github.com/dani-garcia/vaultwarden/graphs/contributors)
-[![Forks](https://img.shields.io/github/forks/dani-garcia/vaultwarden.svg?style=flat-square&logo=github&logoColor=fff&color=005AA4)](https://github.com/dani-garcia/vaultwarden/network/members)
-[![Stars](https://img.shields.io/github/stars/dani-garcia/vaultwarden.svg?style=flat-square&logo=github&logoColor=fff&color=005AA4)](https://github.com/dani-garcia/vaultwarden/stargazers)
-[![Issues Open](https://img.shields.io/github/issues/dani-garcia/vaultwarden.svg?style=flat-square&logo=github&logoColor=fff&color=005AA4&cacheSeconds=300)](https://github.com/dani-garcia/vaultwarden/issues)
-[![Issues Closed](https://img.shields.io/github/issues-closed/dani-garcia/vaultwarden.svg?style=flat-square&logo=github&logoColor=fff&color=005AA4&cacheSeconds=300)](https://github.com/dani-garcia/vaultwarden/issues?q=is%3Aissue+is%3Aclosed)
-[![AGPL-3.0 Licensed](https://img.shields.io/github/license/dani-garcia/vaultwarden.svg?style=flat-square&logo=vaultwarden&color=944000&cacheSeconds=14400)](https://github.com/dani-garcia/vaultwarden/blob/main/LICENSE.txt) <br>
-[![Dependency Status](https://img.shields.io/badge/dynamic/xml?url=https%3A%2F%2Fdeps.rs%2Frepo%2Fgithub%2Fdani-garcia%2Fvaultwarden%2Fstatus.svg&query=%2F*%5Blocal-name()%3D'svg'%5D%2F*%5Blocal-name()%3D'g'%5D%5B2%5D%2F*%5Blocal-name()%3D'text'%5D%5B4%5D&style=flat-square&logo=rust&label=dependencies&color=005AA4)](https://deps.rs/repo/github/dani-garcia/vaultwarden)
-[![GHA Release](https://img.shields.io/github/actions/workflow/status/dani-garcia/vaultwarden/release.yml?style=flat-square&logo=github&logoColor=fff&label=Release%20Workflow)](https://github.com/dani-garcia/vaultwarden/actions/workflows/release.yml)
-[![GHA Build](https://img.shields.io/github/actions/workflow/status/dani-garcia/vaultwarden/build.yml?style=flat-square&logo=github&logoColor=fff&label=Build%20Workflow)](https://github.com/dani-garcia/vaultwarden/actions/workflows/build.yml) <br>
-[![Matrix Chat](https://img.shields.io/matrix/vaultwarden:matrix.org.svg?style=flat-square&logo=matrix&logoColor=fff&color=953B00&cacheSeconds=14400)](https://matrix.to/#/#vaultwarden:matrix.org)
-[![GitHub Discussions](https://img.shields.io/github/discussions/dani-garcia/vaultwarden?style=flat-square&logo=github&logoColor=fff&color=953B00&cacheSeconds=300)](https://github.com/dani-garcia/vaultwarden/discussions)
-[![Discourse Discussions](https://img.shields.io/discourse/topics?server=https%3A%2F%2Fvaultwarden.discourse.group%2F&style=flat-square&logo=discourse&color=953B00)](https://vaultwarden.discourse.group/)
+## Architecture
 
-> [!IMPORTANT]
-> **When using this server, please report any bugs or suggestions directly to us (see [Get in touch](#get-in-touch)), regardless of whatever clients you are using (mobile, desktop, browser...). DO NOT use the official Bitwarden support channels.**
+```
+Bitwarden Clients (Web/Desktop/Mobile/CLI/Browser Extension)
+              │
+              ▼
+    ┌─────────────────────┐
+    │  Cloudflare Worker   │  ◄─ Rust compiled to WASM
+    │  (vaultwarden-cf)    │
+    └──┬──────┬──────┬────┘
+       │      │      │
+       ▼      ▼      ▼
+    ┌─────┐ ┌────┐ ┌────┐
+    │ D1  │ │ KV │ │ R2 │    ◄─ All free tier
+    │(SQL)│ │    │ │    │
+    └─────┘ └────┘ └────┘
+       │
+       ▼
+ ┌──────────────┐
+ │Durable Object│  ◄─ WebSocket push (free tier)
+ │(per-user WS) │
+ └──────────────┘
+```
 
-<br>
+| Original Component | Cloudflare Replacement | Cost |
+|---------------------|----------------------|------|
+| Rocket web framework | `worker` crate (Rust→WASM) | $0 |
+| Diesel ORM + SQLite/PG/MySQL | **D1** (SQLite-compatible) | $0 |
+| Filesystem storage | **R2** object storage | $0 |
+| OpenSSL RSA | `rsa` crate (pure Rust) | $0 |
+| tokio async runtime | Worker runtime | $0 |
+| Background jobs | `#[event(scheduled)]` cron | $0 |
+| SMTP email | **Email Workers** / HTTP APIs | $0 |
+| WebSocket push | **Durable Objects** (hibernatable) | $0 |
+
+## Quick Start
+
+### Prerequisites
+
+- [Rust](https://rustup.rs/) with `wasm32-unknown-unknown` target
+- [Node.js](https://nodejs.org/) 18+
+- [Cloudflare account](https://dash.cloudflare.com/sign-up) (free)
+
+```bash
+# Install tools
+rustup target add wasm32-unknown-unknown
+cargo install worker-build
+npm install
+
+# Login to Cloudflare
+npx wrangler login
+```
+
+### 1. Create Resources
+
+```bash
+# Create D1 database
+npx wrangler d1 create vaultwarden
+# → Copy database_id into wrangler.toml
+
+# Create KV namespace
+npx wrangler kv namespace create KV
+# → Copy id into wrangler.toml
+
+# Create R2 bucket
+npx wrangler r2 bucket create vaultwarden-attachments
+```
+
+### 2. Configure
+
+Edit `wrangler.toml` with your resource IDs and domain:
+
+```toml
+[vars]
+DOMAIN = "https://vaultwarden.your-subdomain.workers.dev"
+```
+
+### 3. Set Secrets
+
+```bash
+# Generate and set RSA key (PKCS#8 or PKCS#1 format both work)
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 | npx wrangler secret put RSA_PRIVATE_KEY_PEM
+
+# Set admin token
+echo "your-admin-token" | npx wrangler secret put ADMIN_TOKEN
+```
+
+### 4. Deploy
+
+```bash
+# Run database migration
+npx wrangler d1 execute vaultwarden --file=migrations/0001_initial.sql
+
+# Deploy
+npm run deploy
+```
+
+### 5. Configure Client
+
+In any Bitwarden client, go to **Settings → Self-hosted** and set the server URL to your Worker URL.
 
 ## Features
 
-A nearly complete implementation of the Bitwarden Client API is provided, including:
+### Complete Bitwarden API Compatibility
 
- * [Personal Vault](https://bitwarden.com/help/managing-items/)
- * [Send](https://bitwarden.com/help/about-send/)
- * [Attachments](https://bitwarden.com/help/attachments/)
- * [Website icons](https://bitwarden.com/help/website-icons/)
- * [Personal API Key](https://bitwarden.com/help/personal-api-key/)
- * [Organizations](https://bitwarden.com/help/getting-started-organizations/)
-   - [Collections](https://bitwarden.com/help/about-collections/),
-     [Password Sharing](https://bitwarden.com/help/sharing/),
-     [Member Roles](https://bitwarden.com/help/user-types-access-control/),
-     [Groups](https://bitwarden.com/help/about-groups/),
-     [Event Logs](https://bitwarden.com/help/event-logs/),
-     [Admin Password Reset](https://bitwarden.com/help/admin-reset/),
-     [Directory Connector](https://bitwarden.com/help/directory-sync/),
-     [Policies](https://bitwarden.com/help/policies/)
- * [Multi/Two Factor Authentication](https://bitwarden.com/help/bitwarden-field-guide-two-step-login/)
-   - [Authenticator](https://bitwarden.com/help/setup-two-step-login-authenticator/),
-     [Email](https://bitwarden.com/help/setup-two-step-login-email/),
-     [FIDO2 WebAuthn](https://bitwarden.com/help/setup-two-step-login-fido/),
-     [YubiKey](https://bitwarden.com/help/setup-two-step-login-yubikey/),
-     [Duo](https://bitwarden.com/help/setup-two-step-login-duo/)
- * [Emergency Access](https://bitwarden.com/help/emergency-access/)
- * [Vaultwarden Admin Backend](https://github.com/dani-garcia/vaultwarden/wiki/Enabling-admin-page)
- * [Modified Web Vault client](https://github.com/dani-garcia/bw_web_builds) (Bundled within our containers)
+| Category | Endpoints | Status |
+|----------|-----------|--------|
+| **Identity** | Login (password/refresh/API key/SSO), prelogin, register | ✅ |
+| **2FA** | TOTP authenticator, email 2FA, recovery codes | ✅ |
+| **SSO/OIDC** | Authorization code flow with PKCE, auto-create users | ✅ |
+| **Accounts** | Profile, password change, KDF, keys, API key, devices, delete | ✅ |
+| **Vault Sync** | Full sync with all ciphers, folders, collections, sends | ✅ |
+| **Ciphers** | CRUD, bulk delete/move, import, purge, soft delete/restore | ✅ |
+| **Folders** | Full CRUD | ✅ |
+| **Sends** | Text/file sends, public access with password, expiration | ✅ |
+| **Attachments** | Upload/download via R2, v2 API | ✅ |
+| **Organizations** | Create/delete, members invite/confirm/remove, collections | ✅ |
+| **Emergency Access** | Invite/accept/confirm, initiate/approve/reject, view/takeover | ✅ |
+| **WebSocket Push** | Real-time sync via Durable Objects, SignalR MessagePack | ✅ |
+| **Email** | 4 backends (CF Email Workers, Resend, SendGrid, Mailgun) | ✅ |
+| **Admin API** | User management, diagnostics, config, org overview | ✅ |
+| **Events** | Client event collection, org event listing | ✅ |
+| **Cron Jobs** | Purge expired sends, clean trashed ciphers | ✅ |
 
-<br>
+## Configuration Reference
 
-## Usage
+### Environment Variables (`wrangler.toml` `[vars]`)
 
-> [!IMPORTANT]
-> The web-vault requires the use a secure context for the [Web Crypto API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API).
-> That means it will only work via `http://localhost:8000` (using the port from the example below) or if you [enable HTTPS](https://github.com/dani-garcia/vaultwarden/wiki/Enabling-HTTPS).
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DOMAIN` | required | Full URL where the worker is deployed |
+| `SIGNUPS_ALLOWED` | `"true"` | Allow new user registration |
+| `PASSWORD_ITERATIONS` | `"600000"` | Server-side PBKDF2 iterations for password hashing |
+| `ACCESS_TOKEN_VALIDITY` | `"7200"` | JWT access token lifetime in seconds |
+| `REFRESH_TOKEN_VALIDITY_DAYS` | `"30"` | Refresh token lifetime in days |
+| `MAIL_ENABLED` | `"false"` | Enable email sending |
+| `MAIL_BACKEND` | `"cloudflare"` | Email backend: `cloudflare`, `resend`, `sendgrid`, `mailgun` |
+| `MAIL_FROM` | `"vaultwarden@yourdomain.com"` | Sender email address |
+| `MAIL_FROM_NAME` | `"Vaultwarden"` | Sender display name |
+| `SSO_ENABLED` | `"false"` | Enable SSO/OIDC authentication |
+| `SSO_CLIENT_ID` | - | OIDC client ID |
+| `SSO_AUTHORITY` | - | OIDC issuer URL |
+| `CORS_ALLOWED_ORIGIN` | `"*"` | CORS allowed origin |
+| `MAILGUN_DOMAIN` | - | Mailgun sending domain |
 
-The recommended way to install and use Vaultwarden is via our container images which are published to [ghcr.io](https://github.com/dani-garcia/vaultwarden/pkgs/container/vaultwarden), [docker.io](https://hub.docker.com/r/vaultwarden/server) and [quay.io](https://quay.io/repository/vaultwarden/server).
-See [which container image to use](https://github.com/dani-garcia/vaultwarden/wiki/Which-container-image-to-use) for an explanation of the provided tags.
+### Secrets (`wrangler secret put`)
 
-There are also [community driven packages](https://github.com/dani-garcia/vaultwarden/wiki/Third-party-packages) which can be used, but those might be lagging behind the latest version or might deviate in the way Vaultwarden is configured, as described in our [Wiki](https://github.com/dani-garcia/vaultwarden/wiki).
+| Secret | Description |
+|--------|-------------|
+| `RSA_PRIVATE_KEY_PEM` | RSA private key for JWT signing (PKCS#1 or PKCS#8 PEM) |
+| `ADMIN_TOKEN` | Admin panel authentication token |
+| `MAIL_API_KEY` | API key for Resend/SendGrid/Mailgun |
+| `SSO_CLIENT_SECRET` | OIDC client secret |
 
-Alternatively, you can also [build Vaultwarden](https://github.com/dani-garcia/vaultwarden/wiki/Building-binary) yourself.
+### Bindings
 
-While Vaultwarden is based upon the [Rocket web framework](https://rocket.rs) which has built-in support for TLS our recommendation would be that you setup a reverse proxy (see [proxy examples](https://github.com/dani-garcia/vaultwarden/wiki/Proxy-examples)).
+| Binding | Type | Description |
+|---------|------|-------------|
+| `DB` | D1 Database | Main database |
+| `KV` | KV Namespace | 2FA tokens, SSO state |
+| `ATTACHMENTS` | R2 Bucket | File attachments and send files |
+| `NOTIFICATION_HUB` | Durable Object | WebSocket push notifications |
 
-> [!TIP]
->**For more detailed examples on how to install, use and configure Vaultwarden you can check our [Wiki](https://github.com/dani-garcia/vaultwarden/wiki).**
+## Email Setup
 
-### Docker/Podman CLI
+### Cloudflare Email Workers (Free)
+1. Enable Email Routing on your domain
+2. Uncomment `[[send_email]]` in `wrangler.toml`
+3. Set `MAIL_ENABLED = "true"`, `MAIL_BACKEND = "cloudflare"`
 
-Pull the container image and mount a volume from the host for persistent storage.<br>
-You can replace `docker` with `podman` if you prefer to use podman.
+### Resend / SendGrid / Mailgun
+```bash
+npx wrangler secret put MAIL_API_KEY
+```
+Set `MAIL_BACKEND` to `resend`, `sendgrid`, or `mailgun`.
 
-```shell
-docker pull vaultwarden/server:latest
-docker run --detach --name vaultwarden \
-  --env DOMAIN="https://vw.domain.tld" \
-  --volume /vw-data/:/data/ \
-  --restart unless-stopped \
-  --publish 127.0.0.1:8000:80 \
-  vaultwarden/server:latest
+## SSO/OIDC Setup
+
+1. Register client in your OIDC provider (Keycloak, Auth0, Okta, etc.)
+2. Redirect URI: `https://your-worker.workers.dev/identity/connect/oidc-signin`
+3. Set secrets and vars:
+```bash
+npx wrangler secret put SSO_CLIENT_SECRET
+```
+```toml
+SSO_ENABLED = "true"
+SSO_CLIENT_ID = "vaultwarden"
+SSO_AUTHORITY = "https://auth.example.com/realms/master"
 ```
 
-This will preserve any persistent data under `/vw-data/`, you can adapt the path to whatever suits you.
+## Testing
 
-### Docker Compose
-
-To use Docker compose you need to create a `compose.yaml` which will hold the configuration to run the Vaultwarden container.
-
-```yaml
-services:
-  vaultwarden:
-    image: vaultwarden/server:latest
-    container_name: vaultwarden
-    restart: unless-stopped
-    environment:
-      DOMAIN: "https://vw.domain.tld"
-    volumes:
-      - ./vw-data/:/data/
-    ports:
-      - 127.0.0.1:8000:80
+```bash
+# 146 end-to-end tests covering all API endpoints
+npm run dev &
+sleep 20
+npx wrangler d1 execute vaultwarden --local --file=migrations/0001_initial.sql
+bash tests/run_tests.sh http://localhost:8787
 ```
 
-<br>
+Tests cover: registration, prelogin, login (password/refresh/API key), profile CRUD, security stamp, folders CRUD, ciphers CRUD (create/read/update/delete/soft-delete/restore/move/import/purge), vault sync, sends (CRUD + public access), organizations (create/members/collections/delete), 2FA (TOTP/email), emergency access, equivalent domains, events, notifications, auth error handling, and full cleanup.
 
-## Get in touch
+## Cloudflare Free Tier Limits
 
-Have a question, suggestion or need help? Join our community on [Matrix](https://matrix.to/#/#vaultwarden:matrix.org), [GitHub Discussions](https://github.com/dani-garcia/vaultwarden/discussions) or [Discourse Forums](https://vaultwarden.discourse.group/).
+| Resource | Free Limit | Typical Personal Usage |
+|----------|-----------|----------------------|
+| Workers requests | 100K/day | ~100-1000/day |
+| D1 reads | 5M rows/day | ~1000-5000/day |
+| D1 writes | 100K rows/day | ~100-500/day |
+| D1 storage | 5 GB | < 100 MB |
+| R2 storage | 10 GB | Depends on attachments |
+| Durable Objects | Free tier | 1 per user (hibernated) |
 
-Encountered a bug or crash? Please search our issue tracker and discussions to see if it's already been reported. If not, please [start a new discussion](https://github.com/dani-garcia/vaultwarden/discussions) or [create a new issue](https://github.com/dani-garcia/vaultwarden/issues/). Ensure you're using the latest version of Vaultwarden and there aren't any similar issues open or closed!
+## Security Model
 
-<br>
+- **Zero-knowledge**: All encryption/decryption happens client-side
+- **Double-hashed passwords**: Client PBKDF2/Argon2 → server PBKDF2 (600K iterations)
+- **RSA-256 JWTs**: Private key stored as Cloudflare secret
+- **2FA enforcement**: TOTP + email verified during login flow
+- **Access control**: Per-cipher ownership + organization membership validation
+- **Security stamp rotation**: Invalidates all sessions on password change
+- **Constant-time comparison**: For all password and token checks
+- **Configurable CORS**: Restrict to your vault domain
 
-## Contributors
+## License
 
-Thanks for your contribution to the project!
-
-[![Contributors Count](https://img.shields.io/github/contributors-anon/dani-garcia/vaultwarden?style=for-the-badge&logo=vaultwarden&color=005AA4)](https://github.com/dani-garcia/vaultwarden/graphs/contributors)<br>
-[![Contributors Avatars](https://contributors-img.web.app/image?repo=dani-garcia/vaultwarden)](https://github.com/dani-garcia/vaultwarden/graphs/contributors)
-
-<br>
-
-## Disclaimer
-
-**This project is not associated with [Bitwarden](https://bitwarden.com/) or Bitwarden, Inc.**
-
-However, one of the active maintainers for Vaultwarden is employed by Bitwarden and is allowed to contribute to the project on their own time. These contributions are independent of Bitwarden and are reviewed by other maintainers.
-
-The maintainers work together to set the direction for the project, focusing on serving the self-hosting community, including individuals, families, and small organizations, while ensuring the project's sustainability.
-
-**Please note:** We cannot be held liable for any data loss that may occur while using Vaultwarden. This includes passwords, attachments, and other information handled by the application. We highly recommend performing regular backups of your files and database. However, should you experience data loss, we encourage you to contact us immediately.
-
-<br>
-
-## Bitwarden_RS
-
-This project was known as Bitwarden_RS and has been renamed to separate itself from the official Bitwarden server in the hopes of avoiding confusion and trademark/branding issues.<br>
-Please see [#1642 - v1.21.0 release and project rename to Vaultwarden](https://github.com/dani-garcia/vaultwarden/discussions/1642) for more explanation.
+AGPL-3.0 (same as original Vaultwarden)

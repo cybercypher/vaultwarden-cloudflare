@@ -1,737 +1,600 @@
-use chrono::NaiveDateTime;
-use percent_encoding::{percent_encode, NON_ALPHANUMERIC};
-use std::{env::consts::EXE_SUFFIX, str::FromStr};
+#![allow(dead_code)]
+//! Email sending module for Cloudflare Workers.
+//!
+//! Supports two backends:
+//! 1. Cloudflare Email Workers `send_email` binding (free, requires Email Routing setup)
+//! 2. HTTP API (Resend, SendGrid, Mailgun, etc.) via fetch
+//!
+//! Configure via wrangler.toml vars:
+//!   MAIL_ENABLED = "true"
+//!   MAIL_FROM = "vaultwarden@yourdomain.com"
+//!   MAIL_FROM_NAME = "Vaultwarden"
+//!   MAIL_BACKEND = "cloudflare" | "resend" | "sendgrid" | "smtp_bridge"
+//!
+//! For HTTP backends, set the API key as a secret:
+//!   wrangler secret put MAIL_API_KEY
 
-use lettre::{
-    message::{Attachment, Body, Mailbox, Message, MultiPart, SinglePart},
-    transport::smtp::authentication::{Credentials, Mechanism as SmtpAuthMechanism},
-    transport::smtp::client::{Tls, TlsParameters},
-    transport::smtp::extension::ClientId,
-    Address, AsyncSendmailTransport, AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
-};
+use base64::Engine;
+use serde_json::json;
+use wasm_bindgen::prelude::*;
+use worker::Env;
 
-use crate::{
-    api::EmptyResult,
-    auth::{
-        encode_jwt, generate_delete_claims, generate_emergency_access_invite_claims, generate_invite_claims,
-        generate_verify_email_claims,
-    },
-    db::models::{Device, DeviceType, EmergencyAccessId, MembershipId, OrganizationId, User, UserId},
-    error::Error,
-    CONFIG,
-};
+use crate::error::{Error, Result};
 
-fn sendmail_transport() -> AsyncSendmailTransport<Tokio1Executor> {
-    if let Some(command) = CONFIG.sendmail_command() {
-        AsyncSendmailTransport::new_with_command(command)
-    } else {
-        AsyncSendmailTransport::new_with_command(format!("sendmail{EXE_SUFFIX}"))
+/// Check if email sending is enabled.
+pub fn is_enabled(env: &Env) -> bool {
+    env.var("MAIL_ENABLED")
+        .map(|v| v.to_string() == "true")
+        .unwrap_or(false)
+}
+
+fn get_from(env: &Env) -> String {
+    env.var("MAIL_FROM")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "vaultwarden@example.com".to_string())
+}
+
+fn get_from_name(env: &Env) -> String {
+    env.var("MAIL_FROM_NAME")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "Vaultwarden".to_string())
+}
+
+fn get_backend(env: &Env) -> String {
+    env.var("MAIL_BACKEND")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "cloudflare".to_string())
+}
+
+fn get_domain(env: &Env) -> String {
+    env.var("DOMAIN")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "https://vaultwarden.example.com".to_string())
+}
+
+/// Send an email. Dispatches to the configured backend.
+pub async fn send_email(
+    env: &Env,
+    to: &str,
+    subject: &str,
+    body_html: &str,
+    body_text: &str,
+) -> Result<()> {
+    if !is_enabled(env) {
+        return Ok(()); // Silently skip if email not configured
+    }
+
+    let backend = get_backend(env);
+    match backend.as_str() {
+        "cloudflare" => send_via_cloudflare(env, to, subject, body_html, body_text).await,
+        "resend" => send_via_resend(env, to, subject, body_html, body_text).await,
+        "sendgrid" => send_via_sendgrid(env, to, subject, body_html, body_text).await,
+        "mailgun" => send_via_mailgun(env, to, subject, body_html, body_text).await,
+        other => Err(Error::internal(format!("Unknown mail backend: {other}"))),
     }
 }
 
-fn smtp_transport() -> AsyncSmtpTransport<Tokio1Executor> {
-    use std::time::Duration;
-    let host = CONFIG.smtp_host().unwrap();
+// =============================================================================
+// Cloudflare Email Workers backend (send_email binding)
+// =============================================================================
 
-    let smtp_client = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host.as_str())
-        .port(CONFIG.smtp_port())
-        .timeout(Some(Duration::from_secs(CONFIG.smtp_timeout())));
+/// Send email using Cloudflare's Email Workers send_email binding.
+/// Requires Email Routing configured on the domain.
+///
+/// wrangler.toml:
+/// ```toml
+/// [[send_email]]
+/// name = "SEND_EMAIL"
+/// ```
+async fn send_via_cloudflare(
+    env: &Env,
+    to: &str,
+    subject: &str,
+    body_html: &str,
+    body_text: &str,
+) -> Result<()> {
+    let from = get_from(env);
+    let from_name = get_from_name(env);
 
-    // Determine security
-    let smtp_client = if CONFIG.smtp_security() != *"off" {
-        let mut tls_parameters = TlsParameters::builder(host);
-        if CONFIG.smtp_accept_invalid_hostnames() {
-            tls_parameters = tls_parameters.dangerous_accept_invalid_hostnames(true);
-        }
-        if CONFIG.smtp_accept_invalid_certs() {
-            tls_parameters = tls_parameters.dangerous_accept_invalid_certs(true);
-        }
-        let tls_parameters = tls_parameters.build().unwrap();
+    // Build a MIME message
+    let mime_message = build_mime_message(&from, &from_name, to, subject, body_html, body_text);
 
-        if CONFIG.smtp_security() == *"force_tls" {
-            smtp_client.tls(Tls::Wrapper(tls_parameters))
-        } else {
-            smtp_client.tls(Tls::Required(tls_parameters))
-        }
-    } else {
-        smtp_client
-    };
+    // Access the send_email binding via JS interop
+    let binding = env
+        .var("__SEND_EMAIL_EXISTS") // Check if binding exists
+        .ok();
 
-    let smtp_client = match (CONFIG.smtp_username(), CONFIG.smtp_password()) {
-        (Some(user), Some(pass)) => smtp_client.credentials(Credentials::new(user, pass)),
-        _ => smtp_client,
-    };
-
-    let smtp_client = match CONFIG.helo_name() {
-        Some(helo_name) => smtp_client.hello_name(ClientId::Domain(helo_name)),
-        None => smtp_client,
-    };
-
-    let smtp_client = match CONFIG.smtp_auth_mechanism() {
-        Some(mechanism) => {
-            let allowed_mechanisms = [SmtpAuthMechanism::Plain, SmtpAuthMechanism::Login, SmtpAuthMechanism::Xoauth2];
-            let mut selected_mechanisms = vec![];
-            for wanted_mechanism in mechanism.split(',') {
-                for m in &allowed_mechanisms {
-                    if m.to_string().to_lowercase()
-                        == wanted_mechanism.trim_matches(|c| c == '"' || c == '\'' || c == ' ').to_lowercase()
-                    {
-                        selected_mechanisms.push(*m);
-                    }
-                }
-            }
-
-            if !selected_mechanisms.is_empty() {
-                smtp_client.authentication(selected_mechanisms)
-            } else {
-                // Only show a warning, and return without setting an actual authentication mechanism
-                warn!("No valid SMTP Auth mechanism found for '{mechanism}', using default values");
-                smtp_client
-            }
-        }
-        _ => smtp_client,
-    };
-
-    smtp_client.build()
+    // Use the JS binding directly
+    send_email_via_binding(env, &mime_message, &from, to).await
 }
 
-// This will sanitize the string values by stripping all the html tags to prevent XSS and HTML Injections
-fn sanitize_data(data: &mut serde_json::Value) {
-    use regex::Regex;
-    use std::sync::LazyLock;
-    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]+>").unwrap());
+/// Call the Cloudflare send_email binding via JS interop.
+async fn send_email_via_binding(
+    env: &Env,
+    mime_message: &str,
+    from: &str,
+    to: &str,
+) -> Result<()> {
+    // The send_email binding is accessed through the environment
+    // We use wasm-bindgen to call the JS API
+    let js_env: &JsValue = env.as_ref();
 
-    match data {
-        serde_json::Value::String(s) => *s = RE.replace_all(s, "").to_string(),
-        serde_json::Value::Object(obj) => {
-            for d in obj.values_mut() {
-                sanitize_data(d);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for d in arr.iter_mut() {
-                sanitize_data(d);
-            }
-        }
-        _ => {}
-    }
-}
+    let send_email_binding = js_sys::Reflect::get(js_env, &JsValue::from_str("SEND_EMAIL"))
+        .map_err(|_| Error::internal("SEND_EMAIL binding not found. Add [[send_email]] to wrangler.toml"))?;
 
-fn get_text(template_name: &'static str, data: serde_json::Value) -> Result<(String, String, String), Error> {
-    let mut data = data;
-    sanitize_data(&mut data);
-    let (subject_html, body_html) = get_template(&format!("{template_name}.html"), &data)?;
-    let (_subject_text, body_text) = get_template(template_name, &data)?;
-    Ok((subject_html, body_html, body_text))
-}
-
-fn get_template(template_name: &str, data: &serde_json::Value) -> Result<(String, String), Error> {
-    let text = CONFIG.render_template(template_name, data)?;
-    let mut text_split = text.split("<!---------------->");
-
-    let subject = match text_split.next() {
-        Some(s) => s.trim().to_string(),
-        None => err!("Template doesn't contain subject"),
-    };
-
-    let body = match text_split.next() {
-        Some(s) => s.trim().to_string(),
-        None => err!("Template doesn't contain body"),
-    };
-
-    if text_split.next().is_some() {
-        err!("Template contains more than one body");
+    if send_email_binding.is_undefined() || send_email_binding.is_null() {
+        return Err(Error::internal(
+            "SEND_EMAIL binding not configured. Add [[send_email]] to wrangler.toml",
+        ));
     }
 
-    Ok((subject, body))
+    // Create EmailMessage object
+    let email_msg = create_email_message(from, to, mime_message)?;
+
+    // Call send on the binding
+    let send_fn = js_sys::Reflect::get(&send_email_binding, &JsValue::from_str("send"))
+        .map_err(|_| Error::internal("send_email binding has no send method"))?;
+
+    let send_fn: js_sys::Function = send_fn
+        .dyn_into()
+        .map_err(|_| Error::internal("send is not a function"))?;
+
+    let promise = send_fn
+        .call1(&send_email_binding, &email_msg)
+        .map_err(|e| Error::internal(format!("Email send failed: {e:?}")))?;
+
+    let promise: js_sys::Promise = promise
+        .dyn_into()
+        .map_err(|_| Error::internal("send did not return a promise"))?;
+
+    wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map_err(|e| Error::internal(format!("Email send failed: {e:?}")))?;
+
+    Ok(())
 }
 
-pub async fn send_password_hint(address: &str, hint: Option<String>) -> EmptyResult {
-    let template_name = if hint.is_some() {
-        "email/pw_hint_some"
-    } else {
-        "email/pw_hint_none"
-    };
+fn create_email_message(from: &str, to: &str, mime_content: &str) -> Result<JsValue> {
+    // Create a JS object representing the email
+    let msg = js_sys::Object::new();
+    js_sys::Reflect::set(&msg, &"from".into(), &from.into())
+        .map_err(|_| Error::internal("Failed to set from"))?;
+    js_sys::Reflect::set(&msg, &"to".into(), &to.into())
+        .map_err(|_| Error::internal("Failed to set to"))?;
 
-    let (subject, body_html, body_text) = get_text(
-        template_name,
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "hint": hint,
-        }),
-    )?;
+    // Create raw MIME content as Uint8Array
+    let content = mime_content.as_bytes();
+    let array = js_sys::Uint8Array::new_with_length(content.len() as u32);
+    array.copy_from(content);
 
-    send_email(address, &subject, body_html, body_text).await
+    js_sys::Reflect::set(&msg, &"raw".into(), &array.into())
+        .map_err(|_| Error::internal("Failed to set raw content"))?;
+
+    Ok(msg.into())
 }
 
-pub async fn send_delete_account(address: &str, user_id: &UserId) -> EmptyResult {
-    let claims = generate_delete_claims(user_id.to_string());
-    let delete_token = encode_jwt(&claims);
+// =============================================================================
+// HTTP API backends
+// =============================================================================
 
-    let (subject, body_html, body_text) = get_text(
-        "email/delete_account",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "user_id": user_id,
-            "email": percent_encode(address.as_bytes(), NON_ALPHANUMERIC).to_string(),
-            "token": delete_token,
-        }),
-    )?;
+/// Send email via Resend (https://resend.com) - 100 emails/day free tier
+async fn send_via_resend(
+    env: &Env,
+    to: &str,
+    subject: &str,
+    body_html: &str,
+    _body_text: &str,
+) -> Result<()> {
+    let api_key = env
+        .secret("MAIL_API_KEY")
+        .map_err(|_| Error::internal("MAIL_API_KEY secret not set for Resend backend"))?
+        .to_string();
+    let from = get_from(env);
+    let from_name = get_from_name(env);
 
-    send_email(address, &subject, body_html, body_text).await
-}
+    let payload = json!({
+        "from": format!("{from_name} <{from}>"),
+        "to": [to],
+        "subject": subject,
+        "html": body_html,
+    });
 
-pub async fn send_verify_email(address: &str, user_id: &UserId) -> EmptyResult {
-    let claims = generate_verify_email_claims(user_id);
-    let verify_email_token = encode_jwt(&claims);
+    let mut headers = worker::Headers::new();
+    headers.set("Authorization", &format!("Bearer {api_key}"))?;
+    headers.set("Content-Type", "application/json")?;
 
-    let (subject, body_html, body_text) = get_text(
-        "email/verify_email",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "user_id": user_id,
-            "email": percent_encode(address.as_bytes(), NON_ALPHANUMERIC).to_string(),
-            "token": verify_email_token,
-        }),
-    )?;
+    let mut init = worker::RequestInit::new();
+    init.with_method(worker::Method::Post);
+    init.with_headers(headers);
+    init.with_body(Some(JsValue::from_str(&payload.to_string())));
 
-    send_email(address, &subject, body_html, body_text).await
-}
+    let request = worker::Request::new_with_init("https://api.resend.com/emails", &init)
+        .map_err(|e| Error::internal(format!("Failed to create request: {e}")))?;
 
-pub async fn send_register_verify_email(email: &str, token: &str) -> EmptyResult {
-    let mut query = url::Url::parse("https://query.builder").unwrap();
-    query.query_pairs_mut().append_pair("email", email).append_pair("token", token);
-    let query_string = match query.query() {
-        None => err!("Failed to build verify URL query parameters"),
-        Some(query) => query,
-    };
+    let resp = worker::Fetch::Request(request)
+        .send()
+        .await
+        .map_err(|e| Error::internal(format!("Resend API error: {e}")))?;
 
-    let (subject, body_html, body_text) = get_text(
-        "email/register_verify_email",
-        json!({
-            // `url.Url` would place the anchor `#` after the query parameters
-            "url": format!("{}/#/finish-signup/?{query_string}", CONFIG.domain()),
-            "img_src": CONFIG._smtp_img_src(),
-            "email": email,
-        }),
-    )?;
-
-    send_email(email, &subject, body_html, body_text).await
-}
-
-pub async fn send_welcome(address: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/welcome",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_welcome_must_verify(address: &str, user_id: &UserId) -> EmptyResult {
-    let claims = generate_verify_email_claims(user_id);
-    let verify_email_token = encode_jwt(&claims);
-
-    let (subject, body_html, body_text) = get_text(
-        "email/welcome_must_verify",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "user_id": user_id,
-            "token": verify_email_token,
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_2fa_removed_from_org(address: &str, org_name: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/send_2fa_removed_from_org",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "org_name": org_name,
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_single_org_removed_from_org(address: &str, org_name: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/send_single_org_removed_from_org",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "org_name": org_name,
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_invite(
-    user: &User,
-    org_id: OrganizationId,
-    member_id: MembershipId,
-    org_name: &str,
-    invited_by_email: Option<String>,
-) -> EmptyResult {
-    let claims = generate_invite_claims(
-        user.uuid.clone(),
-        user.email.clone(),
-        org_id.clone(),
-        member_id.clone(),
-        invited_by_email,
-    );
-    let invite_token = encode_jwt(&claims);
-    let mut query = url::Url::parse("https://query.builder").unwrap();
-    {
-        let mut query_params = query.query_pairs_mut();
-        query_params
-            .append_pair("email", &user.email)
-            .append_pair("organizationName", org_name)
-            .append_pair("organizationId", &org_id)
-            .append_pair("organizationUserId", &member_id)
-            .append_pair("token", &invite_token);
-
-        if CONFIG.sso_enabled() && CONFIG.sso_only() {
-            query_params.append_pair("orgSsoIdentifier", &org_id);
-        }
-        if user.private_key.is_some() {
-            query_params.append_pair("orgUserHasExistingUser", "true");
-        }
+    if resp.status_code() >= 400 {
+        return Err(Error::internal(format!(
+            "Resend API returned status {}",
+            resp.status_code()
+        )));
     }
 
-    let Some(query_string) = query.query() else {
-        err!("Failed to build invite URL query parameters")
-    };
-
-    let (subject, body_html, body_text) = get_text(
-        "email/send_org_invite",
-        json!({
-            // `url.Url` would place the anchor `#` after the query parameters
-            "url": format!("{}/#/accept-organization/?{query_string}", CONFIG.domain()),
-            "img_src": CONFIG._smtp_img_src(),
-            "org_name": org_name,
-        }),
-    )?;
-
-    send_email(&user.email, &subject, body_html, body_text).await
+    Ok(())
 }
 
-pub async fn send_emergency_access_invite(
-    address: &str,
-    user_id: UserId,
-    emer_id: EmergencyAccessId,
-    grantor_name: &str,
-    grantor_email: &str,
-) -> EmptyResult {
-    let claims = generate_emergency_access_invite_claims(
-        user_id,
-        String::from(address),
-        emer_id.clone(),
-        String::from(grantor_name),
-        String::from(grantor_email),
-    );
+/// Send email via SendGrid (https://sendgrid.com) - 100 emails/day free tier
+async fn send_via_sendgrid(
+    env: &Env,
+    to: &str,
+    subject: &str,
+    body_html: &str,
+    body_text: &str,
+) -> Result<()> {
+    let api_key = env
+        .secret("MAIL_API_KEY")
+        .map_err(|_| Error::internal("MAIL_API_KEY secret not set for SendGrid backend"))?
+        .to_string();
+    let from = get_from(env);
+    let from_name = get_from_name(env);
 
-    // Build the query here to ensure proper escaping
-    let mut query = url::Url::parse("https://query.builder").unwrap();
-    {
-        let mut query_params = query.query_pairs_mut();
-        query_params
-            .append_pair("id", &emer_id.to_string())
-            .append_pair("name", grantor_name)
-            .append_pair("email", address)
-            .append_pair("token", &encode_jwt(&claims));
+    let payload = json!({
+        "personalizations": [{
+            "to": [{"email": to}]
+        }],
+        "from": {
+            "email": from,
+            "name": from_name
+        },
+        "subject": subject,
+        "content": [
+            {"type": "text/plain", "value": body_text},
+            {"type": "text/html", "value": body_html}
+        ]
+    });
+
+    let mut headers = worker::Headers::new();
+    headers.set("Authorization", &format!("Bearer {api_key}"))?;
+    headers.set("Content-Type", "application/json")?;
+
+    let mut init = worker::RequestInit::new();
+    init.with_method(worker::Method::Post);
+    init.with_headers(headers);
+    init.with_body(Some(JsValue::from_str(&payload.to_string())));
+
+    let request = worker::Request::new_with_init("https://api.sendgrid.com/v3/mail/send", &init)
+        .map_err(|e| Error::internal(format!("Failed to create request: {e}")))?;
+
+    let resp = worker::Fetch::Request(request)
+        .send()
+        .await
+        .map_err(|e| Error::internal(format!("SendGrid API error: {e}")))?;
+
+    if resp.status_code() >= 400 {
+        return Err(Error::internal(format!(
+            "SendGrid API returned status {}",
+            resp.status_code()
+        )));
     }
 
-    let Some(query_string) = query.query() else {
-        err!("Failed to build emergency invite URL query parameters")
-    };
-
-    let (subject, body_html, body_text) = get_text(
-        "email/send_emergency_access_invite",
-        json!({
-            // `url.Url` would place the anchor `#` after the query parameters
-            "url": format!("{}/#/accept-emergency/?{query_string}", CONFIG.domain()),
-            "img_src": CONFIG._smtp_img_src(),
-            "grantor_name": grantor_name,
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
+    Ok(())
 }
 
-pub async fn send_emergency_access_invite_accepted(address: &str, grantee_email: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/emergency_access_invite_accepted",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "grantee_email": grantee_email,
-        }),
-    )?;
+/// Send email via Mailgun (https://mailgun.com) - 100 emails/day for 3 months free
+async fn send_via_mailgun(
+    env: &Env,
+    to: &str,
+    subject: &str,
+    body_html: &str,
+    body_text: &str,
+) -> Result<()> {
+    let api_key = env
+        .secret("MAIL_API_KEY")
+        .map_err(|_| Error::internal("MAIL_API_KEY secret not set for Mailgun backend"))?
+        .to_string();
+    let domain = env
+        .var("MAILGUN_DOMAIN")
+        .map(|v| v.to_string())
+        .map_err(|_| Error::internal("MAILGUN_DOMAIN variable not set"))?;
+    let from = get_from(env);
+    let from_name = get_from_name(env);
 
-    send_email(address, &subject, body_html, body_text).await
-}
+    let form_body = serde_urlencoded::to_string(&[
+        ("from", format!("{from_name} <{from}>")),
+        ("to", to.to_string()),
+        ("subject", subject.to_string()),
+        ("text", body_text.to_string()),
+        ("html", body_html.to_string()),
+    ])
+    .map_err(|e| Error::internal(format!("Form encoding error: {e}")))?;
 
-pub async fn send_emergency_access_invite_confirmed(address: &str, grantor_name: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/emergency_access_invite_confirmed",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "grantor_name": grantor_name,
-        }),
-    )?;
+    let auth = base64::engine::general_purpose::STANDARD.encode(format!("api:{api_key}"));
 
-    send_email(address, &subject, body_html, body_text).await
-}
+    let mut headers = worker::Headers::new();
+    headers.set("Authorization", &format!("Basic {auth}"))?;
+    headers.set("Content-Type", "application/x-www-form-urlencoded")?;
 
-pub async fn send_emergency_access_recovery_approved(address: &str, grantor_name: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/emergency_access_recovery_approved",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "grantor_name": grantor_name,
-        }),
-    )?;
+    let mut init = worker::RequestInit::new();
+    init.with_method(worker::Method::Post);
+    init.with_headers(headers);
+    init.with_body(Some(JsValue::from_str(&form_body)));
 
-    send_email(address, &subject, body_html, body_text).await
-}
+    let url = format!("https://api.mailgun.net/v3/{domain}/messages");
+    let request = worker::Request::new_with_init(&url, &init)
+        .map_err(|e| Error::internal(format!("Failed to create request: {e}")))?;
 
-pub async fn send_emergency_access_recovery_initiated(
-    address: &str,
-    grantee_name: &str,
-    atype: &str,
-    wait_time_days: &i32,
-) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/emergency_access_recovery_initiated",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "grantee_name": grantee_name,
-            "atype": atype,
-            "wait_time_days": wait_time_days,
-        }),
-    )?;
+    let resp = worker::Fetch::Request(request)
+        .send()
+        .await
+        .map_err(|e| Error::internal(format!("Mailgun API error: {e}")))?;
 
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_emergency_access_recovery_reminder(
-    address: &str,
-    grantee_name: &str,
-    atype: &str,
-    days_left: &str,
-) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/emergency_access_recovery_reminder",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "grantee_name": grantee_name,
-            "atype": atype,
-            "days_left": days_left,
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_emergency_access_recovery_rejected(address: &str, grantor_name: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/emergency_access_recovery_rejected",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "grantor_name": grantor_name,
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_emergency_access_recovery_timed_out(address: &str, grantee_name: &str, atype: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/emergency_access_recovery_timed_out",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "grantee_name": grantee_name,
-            "atype": atype,
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_invite_accepted(new_user_email: &str, address: &str, org_name: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/invite_accepted",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "email": new_user_email,
-            "org_name": org_name,
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_invite_confirmed(address: &str, org_name: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/invite_confirmed",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "org_name": org_name,
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_new_device_logged_in(address: &str, ip: &str, dt: &NaiveDateTime, device: &Device) -> EmptyResult {
-    use crate::util::upcase_first;
-
-    let fmt = "%A, %B %_d, %Y at %r %Z";
-    let (subject, body_html, body_text) = get_text(
-        "email/new_device_logged_in",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "ip": ip,
-            "device_name": upcase_first(&device.name),
-            "device_type": DeviceType::from_i32(device.atype).to_string(),
-            "datetime": crate::util::format_naive_datetime_local(dt, fmt),
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_incomplete_2fa_login(
-    address: &str,
-    ip: &str,
-    dt: &NaiveDateTime,
-    device_name: &str,
-    device_type: &str,
-) -> EmptyResult {
-    use crate::util::upcase_first;
-
-    let fmt = "%A, %B %_d, %Y at %r %Z";
-    let (subject, body_html, body_text) = get_text(
-        "email/incomplete_2fa_login",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "ip": ip,
-            "device_name": upcase_first(device_name),
-            "device_type": device_type,
-            "datetime": crate::util::format_naive_datetime_local(dt, fmt),
-            "time_limit": CONFIG.incomplete_2fa_time_limit(),
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_token(address: &str, token: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/twofactor_email",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "token": token,
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_change_email(address: &str, token: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/change_email",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "token": token,
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_change_email_existing(address: &str, acting_address: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/change_email_existing",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "existing_address": address,
-            "acting_address": acting_address,
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_change_email_invited(address: &str, acting_address: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/change_email_invited",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "existing_address": address,
-            "acting_address": acting_address,
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_sso_change_email(address: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/sso_change_email",
-        json!({
-            "url": format!("{}/#/settings/account", CONFIG.domain()),
-            "img_src": CONFIG._smtp_img_src(),
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_test(address: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/smtp_test",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_admin_reset_password(address: &str, user_name: &str, org_name: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/admin_reset_password",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "user_name": user_name,
-            "org_name": org_name,
-        }),
-    )?;
-    send_email(address, &subject, body_html, body_text).await
-}
-
-pub async fn send_protected_action_token(address: &str, token: &str) -> EmptyResult {
-    let (subject, body_html, body_text) = get_text(
-        "email/protected_action",
-        json!({
-            "url": CONFIG.domain(),
-            "img_src": CONFIG._smtp_img_src(),
-            "token": token,
-        }),
-    )?;
-
-    send_email(address, &subject, body_html, body_text).await
-}
-
-async fn send_with_selected_transport(email: Message) -> EmptyResult {
-    if CONFIG.use_sendmail() {
-        match sendmail_transport().send(email).await {
-            Ok(_) => Ok(()),
-            // Match some common errors and make them more user friendly
-            Err(e) => {
-                if e.is_client() {
-                    debug!("Sendmail client error: {e:?}");
-                    err!(format!("Sendmail client error: {e}"));
-                } else if e.is_response() {
-                    debug!("Sendmail response error: {e:?}");
-                    err!(format!("Sendmail response error: {e}"));
-                } else {
-                    debug!("Sendmail error: {e:?}");
-                    err!(format!("Sendmail error: {e}"));
-                }
-            }
-        }
-    } else {
-        match smtp_transport().send(email).await {
-            Ok(_) => Ok(()),
-            // Match some common errors and make them more user friendly
-            Err(e) => {
-                if e.is_client() {
-                    debug!("SMTP client error: {e:#?}");
-                    err!(format!("SMTP client error: {e}"));
-                } else if e.is_transient() {
-                    debug!("SMTP 4xx error: {e:#?}");
-                    err!(format!("SMTP 4xx error: {e}"));
-                } else if e.is_permanent() {
-                    debug!("SMTP 5xx error: {e:#?}");
-                    let mut msg = e.to_string();
-                    // Add a special check for 535 to add a more descriptive message
-                    if msg.contains("(535)") {
-                        msg = format!("{msg} - Authentication credentials invalid");
-                    }
-                    err!(format!("SMTP 5xx error: {msg}"));
-                } else if e.is_timeout() {
-                    debug!("SMTP timeout error: {e:#?}");
-                    err!(format!("SMTP timeout error: {e}"));
-                } else if e.is_tls() {
-                    debug!("SMTP encryption error: {e:#?}");
-                    err!(format!("SMTP encryption error: {e}"));
-                } else {
-                    debug!("SMTP error: {e:#?}");
-                    err!(format!("SMTP error: {e}"));
-                }
-            }
-        }
+    if resp.status_code() >= 400 {
+        return Err(Error::internal(format!(
+            "Mailgun API returned status {}",
+            resp.status_code()
+        )));
     }
+
+    Ok(())
 }
 
-async fn send_email(address: &str, subject: &str, body_html: String, body_text: String) -> EmptyResult {
-    let smtp_from = Address::from_str(&CONFIG.smtp_from())?;
+// =============================================================================
+// MIME message builder
+// =============================================================================
 
-    let body = if CONFIG.smtp_embed_images() {
-        let logo_gray_body = Body::new(crate::api::static_files("logo-gray.png").unwrap().1.to_vec());
-        let mail_github_body = Body::new(crate::api::static_files("mail-github.png").unwrap().1.to_vec());
-        MultiPart::alternative().singlepart(SinglePart::plain(body_text)).multipart(
-            MultiPart::related()
-                .singlepart(SinglePart::html(body_html))
-                .singlepart(
-                    Attachment::new_inline(String::from("logo-gray.png"))
-                        .body(logo_gray_body, "image/png".parse().unwrap()),
-                )
-                .singlepart(
-                    Attachment::new_inline(String::from("mail-github.png"))
-                        .body(mail_github_body, "image/png".parse().unwrap()),
-                ),
+fn build_mime_message(
+    from: &str,
+    from_name: &str,
+    to: &str,
+    subject: &str,
+    body_html: &str,
+    body_text: &str,
+) -> String {
+    let boundary = format!("----=_Part_{}", crate::util::get_uuid());
+    format!(
+        "From: {from_name} <{from}>\r\n\
+         To: {to}\r\n\
+         Subject: {subject}\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: multipart/alternative; boundary=\"{boundary}\"\r\n\
+         \r\n\
+         --{boundary}\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Transfer-Encoding: quoted-printable\r\n\
+         \r\n\
+         {body_text}\r\n\
+         \r\n\
+         --{boundary}\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Content-Transfer-Encoding: quoted-printable\r\n\
+         \r\n\
+         {body_html}\r\n\
+         \r\n\
+         --{boundary}--\r\n"
+    )
+}
+
+// =============================================================================
+// Email content builders (matching original vaultwarden email types)
+// =============================================================================
+
+/// Send password hint email.
+pub async fn send_password_hint(env: &Env, to: &str, hint: Option<&str>) -> Result<()> {
+    let domain = get_domain(env);
+    let (subject, html, text) = if let Some(hint) = hint {
+        (
+            "Your Master Password Hint",
+            format!(
+                "<html><body>\
+                 <p>You (or someone) recently requested your master password hint.</p>\
+                 <p>Your hint is: <strong>{hint}</strong></p>\
+                 <p>If you did not request this, you can safely ignore this email.</p>\
+                 <p><em>{domain}</em></p>\
+                 </body></html>"
+            ),
+            format!(
+                "You (or someone) recently requested your master password hint.\n\n\
+                 Your hint is: {hint}\n\n\
+                 If you did not request this, you can safely ignore this email.\n\n\
+                 {domain}"
+            ),
         )
     } else {
-        MultiPart::alternative_plain_html(body_text, body_html)
+        (
+            "Your Master Password Hint",
+            format!(
+                "<html><body>\
+                 <p>You (or someone) recently requested your master password hint.</p>\
+                 <p>Unfortunately, your account does not have a password hint.</p>\
+                 <p>If you did not request this, you can safely ignore this email.</p>\
+                 <p><em>{domain}</em></p>\
+                 </body></html>"
+            ),
+            format!(
+                "You (or someone) recently requested your master password hint.\n\n\
+                 Unfortunately, your account does not have a password hint.\n\n\
+                 If you did not request this, you can safely ignore this email.\n\n\
+                 {domain}"
+            ),
+        )
     };
 
-    let email = Message::builder()
-        .message_id(Some(format!("<{}@{}>", crate::util::get_uuid(), smtp_from.domain())))
-        .to(Mailbox::new(None, Address::from_str(address)?))
-        .from(Mailbox::new(Some(CONFIG.smtp_from_name()), smtp_from))
-        .subject(subject)
-        .multipart(body)?;
+    send_email(env, to, subject, &html, &text).await
+}
 
-    send_with_selected_transport(email).await
+/// Send email verification token.
+pub async fn send_verify_email(env: &Env, to: &str, token: &str) -> Result<()> {
+    let domain = get_domain(env);
+    let subject = "Verify Your Email";
+    let html = format!(
+        "<html><body>\
+         <p>Please verify your email address by clicking the link below:</p>\
+         <p><a href=\"{domain}/#/verify-email/?userId=&token={token}\">Verify Email Address</a></p>\
+         <p>If you did not create an account, you can safely ignore this email.</p>\
+         <p><em>{domain}</em></p>\
+         </body></html>"
+    );
+    let text = format!(
+        "Please verify your email address.\n\n\
+         Verification link: {domain}/#/verify-email/?userId=&token={token}\n\n\
+         If you did not create an account, you can safely ignore this email.\n\n\
+         {domain}"
+    );
+
+    send_email(env, to, subject, &html, &text).await
+}
+
+/// Send welcome email after registration.
+pub async fn send_welcome(env: &Env, to: &str) -> Result<()> {
+    let domain = get_domain(env);
+    let subject = "Welcome to Vaultwarden";
+    let html = format!(
+        "<html><body>\
+         <p>Welcome to Vaultwarden!</p>\
+         <p>Your account has been created successfully.</p>\
+         <p>You can access your vault at: <a href=\"{domain}\">{domain}</a></p>\
+         </body></html>"
+    );
+    let text = format!(
+        "Welcome to Vaultwarden!\n\n\
+         Your account has been created successfully.\n\n\
+         You can access your vault at: {domain}"
+    );
+
+    send_email(env, to, subject, &html, &text).await
+}
+
+/// Send 2FA email token.
+pub async fn send_2fa_token(env: &Env, to: &str, token: &str) -> Result<()> {
+    let domain = get_domain(env);
+    let subject = "Vaultwarden Login Verification Code";
+    let html = format!(
+        "<html><body>\
+         <p>Your two-step login verification code is: <strong>{token}</strong></p>\
+         <p>If you did not request this code, you can safely ignore this email. \
+         Someone may have entered your email address by mistake.</p>\
+         <p><em>{domain}</em></p>\
+         </body></html>"
+    );
+    let text = format!(
+        "Your two-step login verification code is: {token}\n\n\
+         If you did not request this code, you can safely ignore this email.\n\
+         Someone may have entered your email address by mistake.\n\n\
+         {domain}"
+    );
+
+    send_email(env, to, subject, &html, &text).await
+}
+
+/// Send incomplete 2FA login notification.
+pub async fn send_incomplete_2fa_notification(
+    env: &Env,
+    to: &str,
+    device_name: &str,
+    ip_address: &str,
+    login_time: &str,
+) -> Result<()> {
+    let domain = get_domain(env);
+    let subject = "Incomplete Login Attempt";
+    let html = format!(
+        "<html><body>\
+         <p>An incomplete login attempt was detected for your account.</p>\
+         <p>Device: <strong>{device_name}</strong><br>\
+         IP Address: <strong>{ip_address}</strong><br>\
+         Time: <strong>{login_time}</strong></p>\
+         <p>If this was you, your master password was entered correctly but the \
+         second step of two-step login was not completed.</p>\
+         <p>If this was not you, your master password may be compromised. \
+         You should change it immediately.</p>\
+         <p><em>{domain}</em></p>\
+         </body></html>"
+    );
+    let text = format!(
+        "An incomplete login attempt was detected for your account.\n\n\
+         Device: {device_name}\n\
+         IP Address: {ip_address}\n\
+         Time: {login_time}\n\n\
+         If this was you, your master password was entered correctly but the \
+         second step of two-step login was not completed.\n\n\
+         If this was not you, your master password may be compromised. \
+         You should change it immediately.\n\n\
+         {domain}"
+    );
+
+    send_email(env, to, subject, &html, &text).await
+}
+
+/// Send organization invite email.
+pub async fn send_org_invite(
+    env: &Env,
+    to: &str,
+    org_name: &str,
+    invited_by: &str,
+    token: &str,
+    org_id: &str,
+    member_id: &str,
+) -> Result<()> {
+    let domain = get_domain(env);
+    let subject = &format!("Join {org_name} on Vaultwarden");
+    let html = format!(
+        "<html><body>\
+         <p>{invited_by} has invited you to join the <strong>{org_name}</strong> organization.</p>\
+         <p><a href=\"{domain}/#/accept-organization/?organizationId={org_id}&organizationUserId={member_id}&token={token}\">Accept Invitation</a></p>\
+         <p><em>{domain}</em></p>\
+         </body></html>"
+    );
+    let text = format!(
+        "{invited_by} has invited you to join the {org_name} organization.\n\n\
+         Accept invitation: {domain}/#/accept-organization/?organizationId={org_id}&organizationUserId={member_id}&token={token}\n\n\
+         {domain}"
+    );
+
+    send_email(env, to, subject, &html, &text).await
+}
+
+/// Send account deletion confirmation email.
+pub async fn send_delete_account(env: &Env, to: &str, token: &str) -> Result<()> {
+    let domain = get_domain(env);
+    let subject = "Delete Your Vaultwarden Account";
+    let html = format!(
+        "<html><body>\
+         <p>A request to delete your account was made. To confirm, click the link below:</p>\
+         <p><a href=\"{domain}/#/verify-recover-delete/?userId=&token={token}\">Delete Account</a></p>\
+         <p>If you did not request this, you can safely ignore this email.</p>\
+         <p><em>{domain}</em></p>\
+         </body></html>"
+    );
+    let text = format!(
+        "A request to delete your account was made.\n\n\
+         To confirm: {domain}/#/verify-recover-delete/?userId=&token={token}\n\n\
+         If you did not request this, you can safely ignore this email.\n\n\
+         {domain}"
+    );
+
+    send_email(env, to, subject, &html, &text).await
+}
+
+/// Send email change verification.
+pub async fn send_change_email(env: &Env, to: &str, token: &str) -> Result<()> {
+    let domain = get_domain(env);
+    let subject = "Change Your Email Address";
+    let html = format!(
+        "<html><body>\
+         <p>A request to change your email address was made.</p>\
+         <p>Your verification code is: <strong>{token}</strong></p>\
+         <p>If you did not request this, you can safely ignore this email.</p>\
+         <p><em>{domain}</em></p>\
+         </body></html>"
+    );
+    let text = format!(
+        "A request to change your email address was made.\n\n\
+         Your verification code is: {token}\n\n\
+         If you did not request this, you can safely ignore this email.\n\n\
+         {domain}"
+    );
+
+    send_email(env, to, subject, &html, &text).await
 }

@@ -1,5 +1,6 @@
 # Local build artifacts
-target
+target/
+build/
 
 # Data folder
 data
@@ -9,8 +10,16 @@ data
 .idea
 *.iml
 
-# Environment file
+# Environment / secrets
 .env
+.dev.vars
 
-# Web vault
-web-vault
+# Web vault build artifacts (keep setup.sh and admin.html)
+web-vault/build/
+web-vault/tmp/
+
+# Cloudflare
+.wrangler/
+
+# Node
+node_modules/

@@ -1,0 +1,23 @@
+{
+  "name": "vaultwarden-cf",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "db:create": "wrangler d1 create vaultwarden",
+    "db:migrate": "wrangler d1 execute vaultwarden --file=migrations/0001_initial.sql",
+    "db:migrate:local": "wrangler d1 execute vaultwarden --local --file=migrations/0001_initial.sql",
+    "vault:setup": "bash web-vault/setup.sh",
+    "vault:deploy": "wrangler pages deploy web-vault/build --project-name vaultwarden-vault",
+    "test": "bash tests/run_tests.sh http://localhost:8787",
+    "test:crypto": "node tests/e2e_realistic.mjs http://localhost:8787",
+    "test:full": "node tests/e2e_full.mjs http://localhost:8787",
+    "test:db": "node tests/e2e_db_verify.mjs http://localhost:8787",
+    "test:files": "node tests/e2e_files_ws.mjs http://localhost:8787"
+  },
+  "devDependencies": {
+    "playwright": "^1.58.2",
+    "wrangler": "^3"
+  }
+}

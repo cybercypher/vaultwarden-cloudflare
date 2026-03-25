@@ -1,0 +1,78 @@
+name = "vaultwarden"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-12-01"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+[vars]
+# Domain where this worker is deployed (e.g., "https://vaultwarden.yourdomain.workers.dev")
+DOMAIN = "https://vaultwarden.example.com"
+# Set to "true" to allow new user signups
+SIGNUPS_ALLOWED = "true"
+# Password iterations for server-side hashing of the master password hash
+PASSWORD_ITERATIONS = "600000"
+# Access token validity in seconds (default 2 hours)
+ACCESS_TOKEN_VALIDITY = "7200"
+# Refresh token validity in days (default 30)
+REFRESH_TOKEN_VALIDITY_DAYS = "30"
+
+# Email configuration
+# Set MAIL_ENABLED = "true" to enable email sending
+MAIL_ENABLED = "false"
+# Backend: "cloudflare" (Email Workers), "resend", "sendgrid", or "mailgun"
+MAIL_BACKEND = "cloudflare"
+MAIL_FROM = "vaultwarden@yourdomain.com"
+MAIL_FROM_NAME = "Vaultwarden"
+# For Mailgun backend only:
+# MAILGUN_DOMAIN = "mg.yourdomain.com"
+
+# SSO/OIDC configuration
+SSO_ENABLED = "false"
+# SSO_CLIENT_ID = "vaultwarden"
+# SSO_AUTHORITY = "https://auth.example.com/realms/master"
+# CORS_ALLOWED_ORIGIN = "*"
+
+# D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "vaultwarden"
+database_id = "YOUR_D1_DATABASE_ID"
+
+# KV Namespace for caching, rate limiting, RSA keys
+[[kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+# R2 Bucket for file attachments and sends
+[[r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "vaultwarden-attachments"
+
+# Durable Object for WebSocket push notifications
+[durable_objects]
+bindings = [
+  { name = "NOTIFICATION_HUB", class_name = "NotificationHub" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["NotificationHub"]
+
+# Cloudflare Email Workers binding (for MAIL_BACKEND = "cloudflare")
+# Requires Email Routing enabled on your domain
+# Uncomment after setting up Email Routing:
+# [[send_email]]
+# name = "SEND_EMAIL"
+
+# Secrets (set via `wrangler secret put`):
+# RSA_PRIVATE_KEY_PEM - RSA private key in PEM format for JWT signing
+# MAIL_API_KEY        - API key for Resend/SendGrid/Mailgun (if using HTTP backend)
+# ADMIN_TOKEN         - Admin panel token (optional)
+#
+# To generate an RSA key:
+#   openssl genrsa 2048 | wrangler secret put RSA_PRIVATE_KEY_PEM
+#
+# Scheduled jobs (cron triggers)
+# [triggers]
+# crons = ["0 */6 * * *"]  # Every 6 hours for cleanup jobs

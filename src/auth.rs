@@ -1,1289 +1,249 @@
-use std::{
-    env,
-    net::IpAddr,
-    sync::{LazyLock, OnceLock},
+#![allow(dead_code)]
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use rsa::pkcs8::DecodePrivateKey;
+use rsa::sha2::Sha256;
+use rsa::{
+    pkcs1v15::{SigningKey, VerifyingKey},
+    RsaPrivateKey, RsaPublicKey,
 };
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use signature::{SignatureEncoding, Signer, Verifier};
+use worker::Env;
 
-use chrono::{DateTime, TimeDelta, Utc};
-use jsonwebtoken::{errors::ErrorKind, Algorithm, DecodingKey, EncodingKey, Header};
-use num_traits::FromPrimitive;
-use openssl::rsa::Rsa;
-use serde::de::DeserializeOwned;
-use serde::ser::Serialize;
+use crate::error::{Error, Result};
 
-use crate::{
-    api::ApiResult,
-    config::PathType,
-    db::models::{
-        AttachmentId, CipherId, CollectionId, DeviceId, DeviceType, EmergencyAccessId, MembershipId, OrgApiKeyId,
-        OrganizationId, SendFileId, SendId, UserId,
-    },
-    error::Error,
-    sso, CONFIG,
-};
+const JWT_HEADER_B64: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
+// = base64url({"alg":"RS256","typ":"JWT"})
 
-const JWT_ALGORITHM: Algorithm = Algorithm::RS256;
-
-// Limit when BitWarden consider the token as expired
-pub static BW_EXPIRATION: LazyLock<TimeDelta> = LazyLock::new(|| TimeDelta::try_minutes(5).unwrap());
-
-pub static DEFAULT_REFRESH_VALIDITY: LazyLock<TimeDelta> = LazyLock::new(|| TimeDelta::try_days(30).unwrap());
-pub static MOBILE_REFRESH_VALIDITY: LazyLock<TimeDelta> = LazyLock::new(|| TimeDelta::try_days(90).unwrap());
-pub static DEFAULT_ACCESS_VALIDITY: LazyLock<TimeDelta> = LazyLock::new(|| TimeDelta::try_hours(2).unwrap());
-static JWT_HEADER: LazyLock<Header> = LazyLock::new(|| Header::new(JWT_ALGORITHM));
-
-pub static JWT_LOGIN_ISSUER: LazyLock<String> = LazyLock::new(|| format!("{}|login", CONFIG.domain_origin()));
-static JWT_INVITE_ISSUER: LazyLock<String> = LazyLock::new(|| format!("{}|invite", CONFIG.domain_origin()));
-static JWT_EMERGENCY_ACCESS_INVITE_ISSUER: LazyLock<String> =
-    LazyLock::new(|| format!("{}|emergencyaccessinvite", CONFIG.domain_origin()));
-static JWT_DELETE_ISSUER: LazyLock<String> = LazyLock::new(|| format!("{}|delete", CONFIG.domain_origin()));
-static JWT_VERIFYEMAIL_ISSUER: LazyLock<String> = LazyLock::new(|| format!("{}|verifyemail", CONFIG.domain_origin()));
-static JWT_ADMIN_ISSUER: LazyLock<String> = LazyLock::new(|| format!("{}|admin", CONFIG.domain_origin()));
-static JWT_SEND_ISSUER: LazyLock<String> = LazyLock::new(|| format!("{}|send", CONFIG.domain_origin()));
-static JWT_ORG_API_KEY_ISSUER: LazyLock<String> =
-    LazyLock::new(|| format!("{}|api.organization", CONFIG.domain_origin()));
-static JWT_FILE_DOWNLOAD_ISSUER: LazyLock<String> =
-    LazyLock::new(|| format!("{}|file_download", CONFIG.domain_origin()));
-static JWT_REGISTER_VERIFY_ISSUER: LazyLock<String> =
-    LazyLock::new(|| format!("{}|register_verify", CONFIG.domain_origin()));
-static JWT_2FA_REMEMBER_ISSUER: LazyLock<String> = LazyLock::new(|| format!("{}|2faremember", CONFIG.domain_origin()));
-
-static PRIVATE_RSA_KEY: OnceLock<EncodingKey> = OnceLock::new();
-static PUBLIC_RSA_KEY: OnceLock<DecodingKey> = OnceLock::new();
-
-pub async fn initialize_keys() -> Result<(), Error> {
-    use std::io::Error;
-
-    let rsa_key_filename = std::path::PathBuf::from(CONFIG.private_rsa_key())
-        .file_name()
-        .ok_or_else(|| Error::other("Private RSA key path missing filename"))?
-        .to_str()
-        .ok_or_else(|| Error::other("Private RSA key path filename is not valid UTF-8"))?
+/// Load RSA private key from Cloudflare secret.
+/// Handles both literal newlines and escaped \n in the PEM string,
+/// and both PKCS#1 (BEGIN RSA PRIVATE KEY) and PKCS#8 (BEGIN PRIVATE KEY) formats.
+fn get_private_key(env: &Env) -> Result<RsaPrivateKey> {
+    let raw_pem = env
+        .secret("RSA_PRIVATE_KEY_PEM")
+        .map_err(|_| Error::internal("RSA_PRIVATE_KEY_PEM secret not set"))?
         .to_string();
+    // Handle escaped newlines from environment variables
+    let pem = raw_pem.replace("\\n", "\n");
 
-    let operator = CONFIG.opendal_operator_for_path_type(&PathType::RsaKey).map_err(Error::other)?;
-
-    let priv_key_buffer = match operator.read(&rsa_key_filename).await {
-        Ok(buffer) => Some(buffer),
-        Err(e) if e.kind() == opendal::ErrorKind::NotFound => None,
-        Err(e) => return Err(e.into()),
-    };
-
-    let (priv_key, priv_key_buffer) = if let Some(priv_key_buffer) = priv_key_buffer {
-        (Rsa::private_key_from_pem(priv_key_buffer.to_vec().as_slice())?, priv_key_buffer.to_vec())
-    } else {
-        let rsa_key = Rsa::generate(2048)?;
-        let priv_key_buffer = rsa_key.private_key_to_pem()?;
-        operator.write(&rsa_key_filename, priv_key_buffer.clone()).await?;
-        info!("Private key '{}' created correctly", CONFIG.private_rsa_key());
-        (rsa_key, priv_key_buffer)
-    };
-    let pub_key_buffer = priv_key.public_key_to_pem()?;
-
-    let enc = EncodingKey::from_rsa_pem(&priv_key_buffer)?;
-    let dec: DecodingKey = DecodingKey::from_rsa_pem(&pub_key_buffer)?;
-    if PRIVATE_RSA_KEY.set(enc).is_err() {
-        err!("PRIVATE_RSA_KEY must only be initialized once")
-    }
-    if PUBLIC_RSA_KEY.set(dec).is_err() {
-        err!("PUBLIC_RSA_KEY must only be initialized once")
-    }
-    Ok(())
+    // Try PKCS#8 first, then PKCS#1
+    RsaPrivateKey::from_pkcs8_pem(&pem)
+        .or_else(|_| {
+            use rsa::pkcs1::DecodeRsaPrivateKey;
+            RsaPrivateKey::from_pkcs1_pem(&pem)
+        })
+        .map_err(|e| Error::internal(format!("Invalid RSA key: {e}")))
 }
 
-pub fn encode_jwt<T: Serialize>(claims: &T) -> String {
-    match jsonwebtoken::encode(&JWT_HEADER, claims, PRIVATE_RSA_KEY.wait()) {
-        Ok(token) => token,
-        Err(e) => panic!("Error encoding jwt {e}"),
-    }
+/// Encode a JWT with RS256.
+pub fn encode_jwt<T: Serialize>(claims: &T, env: &Env) -> Result<String> {
+    let private_key = get_private_key(env)?;
+    let signing_key = SigningKey::<Sha256>::new(private_key);
+
+    let payload = serde_json::to_vec(claims).map_err(|e| Error::internal(format!("JWT serialize: {e}")))?;
+    let payload_b64 = URL_SAFE_NO_PAD.encode(&payload);
+    let signing_input = format!("{JWT_HEADER_B64}.{payload_b64}");
+
+    let signature = signing_key.sign(signing_input.as_bytes());
+    let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+
+    Ok(format!("{signing_input}.{sig_b64}"))
 }
 
-pub fn decode_jwt<T: DeserializeOwned>(token: &str, issuer: String) -> Result<T, Error> {
-    let mut validation = jsonwebtoken::Validation::new(JWT_ALGORITHM);
-    validation.leeway = 30; // 30 seconds
-    validation.validate_exp = true;
-    validation.validate_nbf = true;
-    validation.set_issuer(&[issuer]);
+/// Decode and verify a JWT with RS256.
+pub fn decode_jwt<T: DeserializeOwned>(token: &str, issuer: &str, env: &Env) -> Result<T> {
+    let private_key = get_private_key(env)?;
+    let public_key = RsaPublicKey::from(&private_key);
+    let verifying_key = VerifyingKey::<Sha256>::new(public_key);
 
     let token = token.replace(char::is_whitespace, "");
-    match jsonwebtoken::decode(&token, PUBLIC_RSA_KEY.wait(), &validation) {
-        Ok(d) => Ok(d.claims),
-        Err(err) => match *err.kind() {
-            ErrorKind::InvalidToken => err!("Token is invalid"),
-            ErrorKind::InvalidIssuer => err!("Issuer is invalid"),
-            ErrorKind::ExpiredSignature => err!("Token has expired"),
-            _ => err!(format!("Error decoding JWT: {:?}", err)),
-        },
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(Error::unauthorized("Invalid token format"));
     }
+
+    // Verify signature
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    let sig_bytes = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| Error::unauthorized("Invalid token signature encoding"))?;
+    let signature = rsa::pkcs1v15::Signature::try_from(sig_bytes.as_slice())
+        .map_err(|_| Error::unauthorized("Invalid signature"))?;
+    verifying_key
+        .verify(signing_input.as_bytes(), &signature)
+        .map_err(|_| Error::unauthorized("Token signature verification failed"))?;
+
+    // Decode payload
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .map_err(|_| Error::unauthorized("Invalid token payload encoding"))?;
+    let claims: T =
+        serde_json::from_slice(&payload_bytes).map_err(|_| Error::unauthorized("Invalid token payload"))?;
+
+    // Verify header matches expected RS256
+    if parts[0] != JWT_HEADER_B64 {
+        return Err(Error::unauthorized("Invalid token algorithm"));
+    }
+
+    // Verify issuer and expiration (mandatory)
+    let raw: serde_json::Value = serde_json::from_slice(&payload_bytes)
+        .map_err(|_| Error::unauthorized("Invalid token payload structure"))?;
+    let iss = raw.get("iss").and_then(|v| v.as_str())
+        .ok_or_else(|| Error::unauthorized("Token missing issuer"))?;
+    if iss != issuer {
+        return Err(Error::unauthorized("Invalid token issuer"));
+    }
+    let exp = raw.get("exp").and_then(|v| v.as_i64())
+        .ok_or_else(|| Error::unauthorized("Token missing expiration"))?;
+    if exp < chrono::Utc::now().timestamp() {
+        return Err(Error::unauthorized("Token has expired"));
+    }
+
+    Ok(claims)
 }
 
-pub fn decode_refresh(token: &str) -> Result<RefreshJwtClaims, Error> {
-    decode_jwt(token, JWT_LOGIN_ISSUER.to_string())
-}
-
-pub fn decode_login(token: &str) -> Result<LoginJwtClaims, Error> {
-    decode_jwt(token, JWT_LOGIN_ISSUER.to_string())
-}
-
-pub fn decode_invite(token: &str) -> Result<InviteJwtClaims, Error> {
-    decode_jwt(token, JWT_INVITE_ISSUER.to_string())
-}
-
-pub fn decode_emergency_access_invite(token: &str) -> Result<EmergencyAccessInviteJwtClaims, Error> {
-    decode_jwt(token, JWT_EMERGENCY_ACCESS_INVITE_ISSUER.to_string())
-}
-
-pub fn decode_delete(token: &str) -> Result<BasicJwtClaims, Error> {
-    decode_jwt(token, JWT_DELETE_ISSUER.to_string())
-}
-
-pub fn decode_verify_email(token: &str) -> Result<BasicJwtClaims, Error> {
-    decode_jwt(token, JWT_VERIFYEMAIL_ISSUER.to_string())
-}
-
-pub fn decode_admin(token: &str) -> Result<BasicJwtClaims, Error> {
-    decode_jwt(token, JWT_ADMIN_ISSUER.to_string())
-}
-
-pub fn decode_send(token: &str) -> Result<BasicJwtClaims, Error> {
-    decode_jwt(token, JWT_SEND_ISSUER.to_string())
-}
-
-pub fn decode_api_org(token: &str) -> Result<OrgApiKeyLoginJwtClaims, Error> {
-    decode_jwt(token, JWT_ORG_API_KEY_ISSUER.to_string())
-}
-
-pub fn decode_file_download(token: &str) -> Result<FileDownloadClaims, Error> {
-    decode_jwt(token, JWT_FILE_DOWNLOAD_ISSUER.to_string())
-}
-
-pub fn decode_register_verify(token: &str) -> Result<RegisterVerifyClaims, Error> {
-    decode_jwt(token, JWT_REGISTER_VERIFY_ISSUER.to_string())
-}
-
-pub fn decode_2fa_remember(token: &str) -> Result<TwoFactorRememberClaims, Error> {
-    decode_jwt(token, JWT_2FA_REMEMBER_ISSUER.to_string())
-}
+// ============================================================================
+// JWT Claims Structs
+// ============================================================================
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginJwtClaims {
-    // Not before
     pub nbf: i64,
-    // Expiration time
     pub exp: i64,
-    // Issuer
     pub iss: String,
-    // Subject
-    pub sub: UserId,
-
+    pub sub: String, // user UUID
     pub premium: bool,
     pub name: String,
     pub email: String,
     pub email_verified: bool,
-
-    // ---
-    // Disabled these keys to be added to the JWT since they could cause the JWT to get too large
-    // Also These key/value pairs are not used anywhere by either Vaultwarden or Bitwarden Clients
-    // Because these might get used in the future, and they are added by the Bitwarden Server, lets keep it, but then commented out
-    // See: https://github.com/dani-garcia/vaultwarden/issues/4156
-    // ---
-    // pub orgowner: Vec<String>,
-    // pub orgadmin: Vec<String>,
-    // pub orguser: Vec<String>,
-    // pub orgmanager: Vec<String>,
-
-    // user security_stamp
-    pub sstamp: String,
-    // device uuid
-    pub device: DeviceId,
-    // what kind of device, like FirefoxBrowser or Android derived from DeviceType
+    pub sstamp: String,    // security stamp
+    pub device: String,    // device UUID
     pub devicetype: String,
-    // the type of client_id, like web, cli, desktop, browser or mobile
     pub client_id: String,
-
-    // [ "api", "offline_access" ]
     pub scope: Vec<String>,
-    // [ "Application" ]
     pub amr: Vec<String>,
-}
-
-impl LoginJwtClaims {
-    pub fn new(
-        device: &Device,
-        user: &User,
-        nbf: i64,
-        exp: i64,
-        scope: Vec<String>,
-        client_id: Option<String>,
-        now: DateTime<Utc>,
-    ) -> Self {
-        // ---
-        // Disabled these keys to be added to the JWT since they could cause the JWT to get too large
-        // Also These key/value pairs are not used anywhere by either Vaultwarden or Bitwarden Clients
-        // Because these might get used in the future, and they are added by the Bitwarden Server, lets keep it, but then commented out
-        // ---
-        // fn arg: orgs: Vec<super::UserOrganization>,
-        // ---
-        // let orgowner: Vec<_> = orgs.iter().filter(|o| o.atype == 0).map(|o| o.org_uuid.clone()).collect();
-        // let orgadmin: Vec<_> = orgs.iter().filter(|o| o.atype == 1).map(|o| o.org_uuid.clone()).collect();
-        // let orguser: Vec<_> = orgs.iter().filter(|o| o.atype == 2).map(|o| o.org_uuid.clone()).collect();
-        // let orgmanager: Vec<_> = orgs.iter().filter(|o| o.atype == 3).map(|o| o.org_uuid.clone()).collect();
-
-        if exp <= (now + *BW_EXPIRATION).timestamp() {
-            warn!("Raise access_token lifetime to more than 5min.")
-        }
-
-        // Create the JWT claims struct, to send to the client
-        Self {
-            nbf,
-            exp,
-            iss: JWT_LOGIN_ISSUER.to_string(),
-            sub: user.uuid.clone(),
-            premium: true,
-            name: user.name.clone(),
-            email: user.email.clone(),
-            email_verified: !CONFIG.mail_enabled() || user.verified_at.is_some(),
-
-            // ---
-            // Disabled these keys to be added to the JWT since they could cause the JWT to get too large
-            // Also These key/value pairs are not used anywhere by either Vaultwarden or Bitwarden Clients
-            // Because these might get used in the future, and they are added by the Bitwarden Server, lets keep it, but then commented out
-            // See: https://github.com/dani-garcia/vaultwarden/issues/4156
-            // ---
-            // orgowner,
-            // orgadmin,
-            // orguser,
-            // orgmanager,
-            sstamp: user.security_stamp.clone(),
-            device: device.uuid.clone(),
-            devicetype: DeviceType::from_i32(device.atype).to_string(),
-            client_id: client_id.unwrap_or("undefined".to_string()),
-            scope,
-            amr: vec!["Application".into()],
-        }
-    }
-
-    pub fn default(device: &Device, user: &User, auth_method: &AuthMethod, client_id: Option<String>) -> Self {
-        let time_now = Utc::now();
-        Self::new(
-            device,
-            user,
-            time_now.timestamp(),
-            (time_now + *DEFAULT_ACCESS_VALIDITY).timestamp(),
-            auth_method.scope_vec(),
-            client_id,
-            time_now,
-        )
-    }
-
-    pub fn token(&self) -> String {
-        encode_jwt(&self)
-    }
-
-    pub fn expires_in(&self) -> i64 {
-        self.exp - Utc::now().timestamp()
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct InviteJwtClaims {
-    // Not before
-    pub nbf: i64,
-    // Expiration time
-    pub exp: i64,
-    // Issuer
-    pub iss: String,
-    // Subject
-    pub sub: UserId,
-
-    pub email: String,
-    pub org_id: OrganizationId,
-    pub member_id: MembershipId,
-    pub invited_by_email: Option<String>,
-}
-
-pub fn generate_invite_claims(
-    user_id: UserId,
-    email: String,
-    org_id: OrganizationId,
-    member_id: MembershipId,
-    invited_by_email: Option<String>,
-) -> InviteJwtClaims {
-    let time_now = Utc::now();
-    let expire_hours = i64::from(CONFIG.invitation_expiration_hours());
-    InviteJwtClaims {
-        nbf: time_now.timestamp(),
-        exp: (time_now + TimeDelta::try_hours(expire_hours).unwrap()).timestamp(),
-        iss: JWT_INVITE_ISSUER.to_string(),
-        sub: user_id,
-        email,
-        org_id,
-        member_id,
-        invited_by_email,
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct EmergencyAccessInviteJwtClaims {
-    // Not before
-    pub nbf: i64,
-    // Expiration time
-    pub exp: i64,
-    // Issuer
-    pub iss: String,
-    // Subject
-    pub sub: UserId,
-
-    pub email: String,
-    pub emer_id: EmergencyAccessId,
-    pub grantor_name: String,
-    pub grantor_email: String,
-}
-
-pub fn generate_emergency_access_invite_claims(
-    user_id: UserId,
-    email: String,
-    emer_id: EmergencyAccessId,
-    grantor_name: String,
-    grantor_email: String,
-) -> EmergencyAccessInviteJwtClaims {
-    let time_now = Utc::now();
-    let expire_hours = i64::from(CONFIG.invitation_expiration_hours());
-    EmergencyAccessInviteJwtClaims {
-        nbf: time_now.timestamp(),
-        exp: (time_now + TimeDelta::try_hours(expire_hours).unwrap()).timestamp(),
-        iss: JWT_EMERGENCY_ACCESS_INVITE_ISSUER.to_string(),
-        sub: user_id,
-        email,
-        emer_id,
-        grantor_name,
-        grantor_email,
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct OrgApiKeyLoginJwtClaims {
-    // Not before
-    pub nbf: i64,
-    // Expiration time
-    pub exp: i64,
-    // Issuer
-    pub iss: String,
-    // Subject
-    pub sub: OrgApiKeyId,
-
-    pub client_id: String,
-    pub client_sub: OrganizationId,
-    pub scope: Vec<String>,
-}
-
-pub fn generate_organization_api_key_login_claims(
-    org_api_key_uuid: OrgApiKeyId,
-    org_id: OrganizationId,
-) -> OrgApiKeyLoginJwtClaims {
-    let time_now = Utc::now();
-    OrgApiKeyLoginJwtClaims {
-        nbf: time_now.timestamp(),
-        exp: (time_now + TimeDelta::try_hours(1).unwrap()).timestamp(),
-        iss: JWT_ORG_API_KEY_ISSUER.to_string(),
-        sub: org_api_key_uuid,
-        client_id: format!("organization.{org_id}"),
-        client_sub: org_id,
-        scope: vec!["api.organization".into()],
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FileDownloadClaims {
-    // Not before
-    pub nbf: i64,
-    // Expiration time
-    pub exp: i64,
-    // Issuer
-    pub iss: String,
-    // Subject
-    pub sub: CipherId,
-
-    pub file_id: AttachmentId,
-}
-
-pub fn generate_file_download_claims(cipher_id: CipherId, file_id: AttachmentId) -> FileDownloadClaims {
-    let time_now = Utc::now();
-    FileDownloadClaims {
-        nbf: time_now.timestamp(),
-        exp: (time_now + TimeDelta::try_minutes(5).unwrap()).timestamp(),
-        iss: JWT_FILE_DOWNLOAD_ISSUER.to_string(),
-        sub: cipher_id,
-        file_id,
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RegisterVerifyClaims {
-    // Not before
-    pub nbf: i64,
-    // Expiration time
-    pub exp: i64,
-    // Issuer
-    pub iss: String,
-    // Subject
-    pub sub: String,
-
-    pub name: Option<String>,
-    pub verified: bool,
-}
-
-pub fn generate_register_verify_claims(email: String, name: Option<String>, verified: bool) -> RegisterVerifyClaims {
-    let time_now = Utc::now();
-    RegisterVerifyClaims {
-        nbf: time_now.timestamp(),
-        exp: (time_now + TimeDelta::try_minutes(30).unwrap()).timestamp(),
-        iss: JWT_REGISTER_VERIFY_ISSUER.to_string(),
-        sub: email,
-        name,
-        verified,
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct TwoFactorRememberClaims {
-    // Not before
-    pub nbf: i64,
-    // Expiration time
-    pub exp: i64,
-    // Issuer
-    pub iss: String,
-    // Subject
-    pub sub: DeviceId,
-    // UserId
-    pub user_uuid: UserId,
-}
-
-pub fn generate_2fa_remember_claims(device_uuid: DeviceId, user_uuid: UserId) -> TwoFactorRememberClaims {
-    let time_now = Utc::now();
-    TwoFactorRememberClaims {
-        nbf: time_now.timestamp(),
-        exp: (time_now + TimeDelta::try_days(30).unwrap()).timestamp(),
-        iss: JWT_2FA_REMEMBER_ISSUER.to_string(),
-        sub: device_uuid,
-        user_uuid,
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BasicJwtClaims {
-    // Not before
-    pub nbf: i64,
-    // Expiration time
-    pub exp: i64,
-    // Issuer
-    pub iss: String,
-    // Subject
-    pub sub: String,
-}
-
-pub fn generate_delete_claims(uuid: String) -> BasicJwtClaims {
-    let time_now = Utc::now();
-    let expire_hours = i64::from(CONFIG.invitation_expiration_hours());
-    BasicJwtClaims {
-        nbf: time_now.timestamp(),
-        exp: (time_now + TimeDelta::try_hours(expire_hours).unwrap()).timestamp(),
-        iss: JWT_DELETE_ISSUER.to_string(),
-        sub: uuid,
-    }
-}
-
-pub fn generate_verify_email_claims(user_id: &UserId) -> BasicJwtClaims {
-    let time_now = Utc::now();
-    let expire_hours = i64::from(CONFIG.invitation_expiration_hours());
-    BasicJwtClaims {
-        nbf: time_now.timestamp(),
-        exp: (time_now + TimeDelta::try_hours(expire_hours).unwrap()).timestamp(),
-        iss: JWT_VERIFYEMAIL_ISSUER.to_string(),
-        sub: user_id.to_string(),
-    }
-}
-
-pub fn generate_admin_claims() -> BasicJwtClaims {
-    let time_now = Utc::now();
-    BasicJwtClaims {
-        nbf: time_now.timestamp(),
-        exp: (time_now + TimeDelta::try_minutes(CONFIG.admin_session_lifetime()).unwrap()).timestamp(),
-        iss: JWT_ADMIN_ISSUER.to_string(),
-        sub: "admin_panel".to_string(),
-    }
-}
-
-pub fn generate_send_claims(send_id: &SendId, file_id: &SendFileId) -> BasicJwtClaims {
-    let time_now = Utc::now();
-    BasicJwtClaims {
-        nbf: time_now.timestamp(),
-        exp: (time_now + TimeDelta::try_minutes(2).unwrap()).timestamp(),
-        iss: JWT_SEND_ISSUER.to_string(),
-        sub: format!("{send_id}/{file_id}"),
-    }
-}
-
-//
-// Bearer token authentication
-//
-use rocket::{
-    outcome::try_outcome,
-    request::{FromRequest, Outcome, Request},
-};
-
-use crate::db::{
-    models::{Collection, Device, Membership, MembershipStatus, MembershipType, User, UserStampException},
-    DbConn,
-};
-
-pub struct Host {
-    pub host: String,
-}
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for Host {
-    type Error = &'static str;
-
-    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let headers = request.headers();
-
-        // Get host
-        let host = if CONFIG.domain_set() {
-            CONFIG.domain()
-        } else if let Some(referer) = headers.get_one("Referer") {
-            referer.to_string()
-        } else {
-            // Try to guess from the headers
-            let protocol = if let Some(proto) = headers.get_one("X-Forwarded-Proto") {
-                proto
-            } else if env::var("ROCKET_TLS").is_ok() {
-                "https"
-            } else {
-                "http"
-            };
-
-            let host = if let Some(host) = headers.get_one("X-Forwarded-Host") {
-                host
-            } else {
-                headers.get_one("Host").unwrap_or_default()
-            };
-
-            format!("{protocol}://{host}")
-        };
-
-        Outcome::Success(Host {
-            host,
-        })
-    }
-}
-
-pub struct ClientHeaders {
-    pub device_type: i32,
-    pub ip: ClientIp,
-}
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for ClientHeaders {
-    type Error = &'static str;
-
-    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let ip = match ClientIp::from_request(request).await {
-            Outcome::Success(ip) => ip,
-            _ => err_handler!("Error getting Client IP"),
-        };
-        // When unknown or unable to parse, return 14, which is 'Unknown Browser'
-        let device_type: i32 =
-            request.headers().get_one("device-type").map(|d| d.parse().unwrap_or(14)).unwrap_or_else(|| 14);
-
-        Outcome::Success(ClientHeaders {
-            device_type,
-            ip,
-        })
-    }
-}
-
-pub struct Headers {
-    pub host: String,
-    pub device: Device,
-    pub user: User,
-    pub ip: ClientIp,
-}
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for Headers {
-    type Error = &'static str;
-
-    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let headers = request.headers();
-
-        let host = try_outcome!(Host::from_request(request).await).host;
-        let ip = match ClientIp::from_request(request).await {
-            Outcome::Success(ip) => ip,
-            _ => err_handler!("Error getting Client IP"),
-        };
-
-        // Get access_token
-        let access_token: &str = match headers.get_one("Authorization") {
-            Some(a) => match a.rsplit("Bearer ").next() {
-                Some(split) => split,
-                None => err_handler!("No access token provided"),
-            },
-            None => err_handler!("No access token provided"),
-        };
-
-        // Check JWT token is valid and get device and user from it
-        let Ok(claims) = decode_login(access_token) else {
-            err_handler!("Invalid claim")
-        };
-
-        let device_id = claims.device;
-        let user_id = claims.sub;
-
-        let conn = match DbConn::from_request(request).await {
-            Outcome::Success(conn) => conn,
-            _ => err_handler!("Error getting DB"),
-        };
-
-        let Some(device) = Device::find_by_uuid_and_user(&device_id, &user_id, &conn).await else {
-            err_handler!("Invalid device id")
-        };
-
-        let Some(user) = User::find_by_uuid(&user_id, &conn).await else {
-            err_handler!("Device has no user associated")
-        };
-
-        if user.security_stamp != claims.sstamp {
-            if let Some(stamp_exception) =
-                user.stamp_exception.as_deref().and_then(|s| serde_json::from_str::<UserStampException>(s).ok())
-            {
-                let Some(current_route) = request.route().and_then(|r| r.name.as_deref()) else {
-                    err_handler!("Error getting current route for stamp exception")
-                };
-
-                // Check if the stamp exception has expired first.
-                // Then, check if the current route matches any of the allowed routes.
-                // After that check the stamp in exception matches the one in the claims.
-                if Utc::now().timestamp() > stamp_exception.expire {
-                    // If the stamp exception has been expired remove it from the database.
-                    // This prevents checking this stamp exception for new requests.
-                    let mut user = user;
-                    user.reset_stamp_exception();
-                    if let Err(e) = user.save(&conn).await {
-                        error!("Error updating user: {e:#?}");
-                    }
-                    err_handler!("Stamp exception is expired")
-                } else if !stamp_exception.routes.contains(&current_route.to_string()) {
-                    err_handler!("Invalid security stamp: Current route and exception route do not match")
-                } else if stamp_exception.security_stamp != claims.sstamp {
-                    err_handler!("Invalid security stamp for matched stamp exception")
-                }
-            } else {
-                err_handler!("Invalid security stamp")
-            }
-        }
-
-        Outcome::Success(Headers {
-            host,
-            device,
-            user,
-            ip,
-        })
-    }
-}
-
-pub struct OrgHeaders {
-    pub host: String,
-    pub device: Device,
-    pub user: User,
-    pub membership_type: MembershipType,
-    pub membership_status: MembershipStatus,
-    pub membership: Membership,
-    pub ip: ClientIp,
-}
-
-impl OrgHeaders {
-    fn is_member(&self) -> bool {
-        // NOTE: we don't care about MembershipStatus at the moment because this is only used
-        // where an invited, accepted or confirmed user is expected if this ever changes or
-        // if from_i32 is changed to return Some(Revoked) this check needs to be changed accordingly
-        self.membership_type >= MembershipType::User
-    }
-    fn is_confirmed_and_admin(&self) -> bool {
-        self.membership_status == MembershipStatus::Confirmed && self.membership_type >= MembershipType::Admin
-    }
-    fn is_confirmed_and_manager(&self) -> bool {
-        self.membership_status == MembershipStatus::Confirmed && self.membership_type >= MembershipType::Manager
-    }
-    fn is_confirmed_and_owner(&self) -> bool {
-        self.membership_status == MembershipStatus::Confirmed && self.membership_type == MembershipType::Owner
-    }
-}
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for OrgHeaders {
-    type Error = &'static str;
-
-    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let headers = try_outcome!(Headers::from_request(request).await);
-
-        // org_id is usually the second path param ("/organizations/<org_id>"),
-        // but there are cases where it is a query value.
-        // First check the path, if this is not a valid uuid, try the query values.
-        let url_org_id: Option<OrganizationId> = {
-            if let Some(Ok(org_id)) = request.param::<OrganizationId>(1) {
-                Some(org_id)
-            } else if let Some(Ok(org_id)) = request.query_value::<OrganizationId>("organizationId") {
-                Some(org_id)
-            } else {
-                None
-            }
-        };
-
-        match url_org_id {
-            Some(org_id) if uuid::Uuid::parse_str(&org_id).is_ok() => {
-                let conn = match DbConn::from_request(request).await {
-                    Outcome::Success(conn) => conn,
-                    _ => err_handler!("Error getting DB"),
-                };
-
-                let user = headers.user;
-                let Some(membership) = Membership::find_by_user_and_org(&user.uuid, &org_id, &conn).await else {
-                    err_handler!("The current user isn't member of the organization");
-                };
-
-                Outcome::Success(Self {
-                    host: headers.host,
-                    device: headers.device,
-                    user,
-                    membership_type: {
-                        if let Some(member_type) = MembershipType::from_i32(membership.atype) {
-                            member_type
-                        } else {
-                            // This should only happen if the DB is corrupted
-                            err_handler!("Unknown user type in the database")
-                        }
-                    },
-                    membership_status: {
-                        if let Some(member_status) = MembershipStatus::from_i32(membership.status) {
-                            // NOTE: add additional check for revoked if from_i32 is ever changed
-                            // to return Revoked status.
-                            member_status
-                        } else {
-                            err_handler!("User status is either revoked or invalid.")
-                        }
-                    },
-                    membership,
-                    ip: headers.ip,
-                })
-            }
-            _ => err_handler!("Error getting the organization id"),
-        }
-    }
-}
-
-pub struct AdminHeaders {
-    pub host: String,
-    pub device: Device,
-    pub user: User,
-    pub membership_type: MembershipType,
-    pub ip: ClientIp,
-    pub org_id: OrganizationId,
-}
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for AdminHeaders {
-    type Error = &'static str;
-
-    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let headers = try_outcome!(OrgHeaders::from_request(request).await);
-        if headers.is_confirmed_and_admin() {
-            Outcome::Success(Self {
-                host: headers.host,
-                device: headers.device,
-                user: headers.user,
-                membership_type: headers.membership_type,
-                ip: headers.ip,
-                org_id: headers.membership.org_uuid,
-            })
-        } else {
-            err_handler!("You need to be Admin or Owner to call this endpoint")
-        }
-    }
-}
-
-// col_id is usually the fourth path param ("/organizations/<org_id>/collections/<col_id>"),
-// but there could be cases where it is a query value.
-// First check the path, if this is not a valid uuid, try the query values.
-fn get_col_id(request: &Request<'_>) -> Option<CollectionId> {
-    if let Some(Ok(col_id)) = request.param::<String>(3) {
-        if uuid::Uuid::parse_str(&col_id).is_ok() {
-            return Some(col_id.into());
-        }
-    }
-
-    if let Some(Ok(col_id)) = request.query_value::<String>("collectionId") {
-        if uuid::Uuid::parse_str(&col_id).is_ok() {
-            return Some(col_id.into());
-        }
-    }
-
-    None
-}
-
-/// The ManagerHeaders are used to check if you are at least a Manager
-/// and have access to the specific collection provided via the <col_id>/collections/collectionId.
-/// This does strict checking on the collection_id, ManagerHeadersLoose does not.
-pub struct ManagerHeaders {
-    pub host: String,
-    pub device: Device,
-    pub user: User,
-    pub ip: ClientIp,
-    pub org_id: OrganizationId,
-}
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for ManagerHeaders {
-    type Error = &'static str;
-
-    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let headers = try_outcome!(OrgHeaders::from_request(request).await);
-        if headers.is_confirmed_and_manager() {
-            match get_col_id(request) {
-                Some(col_id) => {
-                    let conn = match DbConn::from_request(request).await {
-                        Outcome::Success(conn) => conn,
-                        _ => err_handler!("Error getting DB"),
-                    };
-
-                    if !Collection::is_coll_manageable_by_user(&col_id, &headers.membership.user_uuid, &conn).await {
-                        err_handler!("The current user isn't a manager for this collection")
-                    }
-                }
-                _ => err_handler!("Error getting the collection id"),
-            }
-
-            Outcome::Success(Self {
-                host: headers.host,
-                device: headers.device,
-                user: headers.user,
-                ip: headers.ip,
-                org_id: headers.membership.org_uuid,
-            })
-        } else {
-            err_handler!("You need to be a Manager, Admin or Owner to call this endpoint")
-        }
-    }
-}
-
-impl From<ManagerHeaders> for Headers {
-    fn from(h: ManagerHeaders) -> Headers {
-        Headers {
-            host: h.host,
-            device: h.device,
-            user: h.user,
-            ip: h.ip,
-        }
-    }
-}
-
-/// The ManagerHeadersLoose is used when you at least need to be a Manager,
-/// but there is no collection_id sent with the request (either in the path or as form data).
-pub struct ManagerHeadersLoose {
-    pub host: String,
-    pub device: Device,
-    pub user: User,
-    pub membership: Membership,
-    pub ip: ClientIp,
-}
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for ManagerHeadersLoose {
-    type Error = &'static str;
-
-    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let headers = try_outcome!(OrgHeaders::from_request(request).await);
-        if headers.is_confirmed_and_manager() {
-            Outcome::Success(Self {
-                host: headers.host,
-                device: headers.device,
-                user: headers.user,
-                membership: headers.membership,
-                ip: headers.ip,
-            })
-        } else {
-            err_handler!("You need to be a Manager, Admin or Owner to call this endpoint")
-        }
-    }
-}
-
-impl From<ManagerHeadersLoose> for Headers {
-    fn from(h: ManagerHeadersLoose) -> Headers {
-        Headers {
-            host: h.host,
-            device: h.device,
-            user: h.user,
-            ip: h.ip,
-        }
-    }
-}
-
-impl ManagerHeaders {
-    pub async fn from_loose(
-        h: ManagerHeadersLoose,
-        collections: &Vec<CollectionId>,
-        conn: &DbConn,
-    ) -> Result<ManagerHeaders, Error> {
-        for col_id in collections {
-            if uuid::Uuid::parse_str(col_id.as_ref()).is_err() {
-                err!("Collection Id is malformed!");
-            }
-            if !Collection::is_coll_manageable_by_user(col_id, &h.membership.user_uuid, conn).await {
-                err!("Collection not found", "The current user isn't a manager for this collection")
-            }
-        }
-
-        Ok(ManagerHeaders {
-            host: h.host,
-            device: h.device,
-            user: h.user,
-            ip: h.ip,
-            org_id: h.membership.org_uuid,
-        })
-    }
-}
-
-pub struct OwnerHeaders {
-    pub device: Device,
-    pub user: User,
-    pub ip: ClientIp,
-    pub org_id: OrganizationId,
-}
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for OwnerHeaders {
-    type Error = &'static str;
-
-    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let headers = try_outcome!(OrgHeaders::from_request(request).await);
-        if headers.is_confirmed_and_owner() {
-            Outcome::Success(Self {
-                device: headers.device,
-                user: headers.user,
-                ip: headers.ip,
-                org_id: headers.membership.org_uuid,
-            })
-        } else {
-            err_handler!("You need to be Owner to call this endpoint")
-        }
-    }
-}
-
-pub struct OrgMemberHeaders {
-    pub host: String,
-    pub device: Device,
-    pub user: User,
-    pub membership: Membership,
-    pub ip: ClientIp,
-}
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for OrgMemberHeaders {
-    type Error = &'static str;
-
-    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let headers = try_outcome!(OrgHeaders::from_request(request).await);
-        if headers.is_member() {
-            Outcome::Success(Self {
-                host: headers.host,
-                device: headers.device,
-                user: headers.user,
-                membership: headers.membership,
-                ip: headers.ip,
-            })
-        } else {
-            err_handler!("You need to be a Member of the Organization to call this endpoint")
-        }
-    }
-}
-
-impl From<OrgMemberHeaders> for Headers {
-    fn from(h: OrgMemberHeaders) -> Headers {
-        Headers {
-            host: h.host,
-            device: h.device,
-            user: h.user,
-            ip: h.ip,
-        }
-    }
-}
-
-//
-// Client IP address detection
-//
-
-pub struct ClientIp {
-    pub ip: IpAddr,
-}
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for ClientIp {
-    type Error = ();
-
-    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let ip = if CONFIG._ip_header_enabled() {
-            req.headers().get_one(&CONFIG.ip_header()).and_then(|ip| {
-                match ip.find(',') {
-                    Some(idx) => &ip[..idx],
-                    None => ip,
-                }
-                .parse()
-                .map_err(|_| warn!("'{}' header is malformed: {ip}", CONFIG.ip_header()))
-                .ok()
-            })
-        } else {
-            None
-        };
-
-        let ip = ip.or_else(|| req.remote().map(|r| r.ip())).unwrap_or_else(|| "0.0.0.0".parse().unwrap());
-
-        Outcome::Success(ClientIp {
-            ip,
-        })
-    }
-}
-
-pub struct Secure {
-    pub https: bool,
-}
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for Secure {
-    type Error = ();
-
-    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let headers = request.headers();
-
-        // Try to guess from the headers
-        let protocol = match headers.get_one("X-Forwarded-Proto") {
-            Some(proto) => proto,
-            None => {
-                if env::var("ROCKET_TLS").is_ok() {
-                    "https"
-                } else {
-                    "http"
-                }
-            }
-        };
-
-        Outcome::Success(Secure {
-            https: protocol == "https",
-        })
-    }
-}
-
-pub struct WsAccessTokenHeader {
-    pub access_token: Option<String>,
-}
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for WsAccessTokenHeader {
-    type Error = ();
-
-    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let headers = request.headers();
-
-        // Get access_token
-        let access_token = match headers.get_one("Authorization") {
-            Some(a) => a.rsplit("Bearer ").next().map(String::from),
-            None => None,
-        };
-
-        Outcome::Success(Self {
-            access_token,
-        })
-    }
-}
-
-pub struct ClientVersion(pub semver::Version);
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for ClientVersion {
-    type Error = &'static str;
-
-    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let headers = request.headers();
-
-        let Some(version) = headers.get_one("Bitwarden-Client-Version") else {
-            err_handler!("No Bitwarden-Client-Version header provided")
-        };
-
-        let Ok(version) = semver::Version::parse(version) else {
-            err_handler!("Invalid Bitwarden-Client-Version header provided")
-        };
-
-        Outcome::Success(ClientVersion(version))
-    }
-}
-
-#[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AuthMethod {
-    OrgApiKey,
-    Password,
-    Sso,
-    UserApiKey,
-}
-
-impl AuthMethod {
-    pub fn scope(&self) -> String {
-        match self {
-            AuthMethod::OrgApiKey => "api.organization".to_string(),
-            AuthMethod::Password => "api offline_access".to_string(),
-            AuthMethod::Sso => "api offline_access".to_string(),
-            AuthMethod::UserApiKey => "api".to_string(),
-        }
-    }
-
-    pub fn scope_vec(&self) -> Vec<String> {
-        self.scope().split_whitespace().map(str::to_string).collect()
-    }
-
-    pub fn check_scope(&self, scope: Option<&String>) -> ApiResult<String> {
-        let method_scope = self.scope();
-        match scope {
-            None => err!("Missing scope"),
-            Some(scope) if scope == &method_scope => Ok(method_scope),
-            Some(scope) => err!(format!("Scope ({scope}) not supported")),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum TokenWrapper {
-    Access(String),
-    Refresh(String),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RefreshJwtClaims {
-    // Not before
     pub nbf: i64,
-    // Expiration time
     pub exp: i64,
-    // Issuer
     pub iss: String,
-    // Subject
-    pub sub: AuthMethod,
-
-    pub device_token: String,
-
-    pub token: Option<TokenWrapper>,
+    pub sub: String,
+    pub device: String,
+    pub token: String, // refresh token identifier
+    pub scope: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct AuthTokens {
-    pub refresh_claims: RefreshJwtClaims,
-    pub access_claims: LoginJwtClaims,
+pub struct TwoFactorRememberClaims {
+    pub nbf: i64,
+    pub exp: i64,
+    pub iss: String,
+    pub sub: String,
+    pub device: String,
 }
 
-impl AuthTokens {
-    pub fn refresh_token(&self) -> String {
-        encode_jwt(&self.refresh_claims)
-    }
-
-    pub fn access_token(&self) -> String {
-        self.access_claims.token()
-    }
-
-    pub fn expires_in(&self) -> i64 {
-        self.access_claims.expires_in()
-    }
-
-    pub fn scope(&self) -> String {
-        self.refresh_claims.sub.scope()
-    }
-
-    // Create refresh_token and access_token with default validity
-    pub fn new(device: &Device, user: &User, sub: AuthMethod, client_id: Option<String>) -> Self {
-        let time_now = Utc::now();
-
-        let access_claims = LoginJwtClaims::default(device, user, &sub, client_id);
-
-        let validity = if device.is_mobile() {
-            *MOBILE_REFRESH_VALIDITY
-        } else {
-            *DEFAULT_REFRESH_VALIDITY
-        };
-
-        let refresh_claims = RefreshJwtClaims {
-            nbf: time_now.timestamp(),
-            exp: (time_now + validity).timestamp(),
-            iss: JWT_LOGIN_ISSUER.to_string(),
-            sub,
-            device_token: device.refresh_token.clone(),
-            token: None,
-        };
-
-        Self {
-            refresh_claims,
-            access_claims,
-        }
+/// Create login JWT claims.
+pub fn make_login_claims(
+    user_uuid: &str,
+    email: &str,
+    name: &str,
+    device_uuid: &str,
+    device_type: &str,
+    security_stamp: &str,
+    client_id: &str,
+    scope: Vec<String>,
+    access_validity_secs: i64,
+    domain: &str,
+) -> LoginJwtClaims {
+    let now = chrono::Utc::now().timestamp();
+    LoginJwtClaims {
+        nbf: now,
+        exp: now + access_validity_secs,
+        iss: format!("{domain}|login"),
+        sub: user_uuid.to_string(),
+        premium: true,
+        name: name.to_string(),
+        email: email.to_string(),
+        email_verified: true,
+        sstamp: security_stamp.to_string(),
+        device: device_uuid.to_string(),
+        devicetype: device_type.to_string(),
+        client_id: client_id.to_string(),
+        scope,
+        amr: vec!["Application".into()],
     }
 }
 
-pub async fn refresh_tokens(
-    ip: &ClientIp,
+/// Create refresh JWT claims.
+pub fn make_refresh_claims(
+    user_uuid: &str,
+    device_uuid: &str,
     refresh_token: &str,
-    client_id: Option<String>,
-    conn: &DbConn,
-) -> ApiResult<(Device, AuthTokens)> {
-    let refresh_claims = match decode_refresh(refresh_token) {
-        Err(err) => {
-            error!("Failed to decode {} refresh_token: {refresh_token}: {err:?}", ip.ip);
-            //err_silent!(format!("Impossible to read refresh_token: {}", err.message()))
+    scope: Vec<String>,
+    refresh_validity_days: i64,
+    domain: &str,
+) -> RefreshJwtClaims {
+    let now = chrono::Utc::now().timestamp();
+    RefreshJwtClaims {
+        nbf: now,
+        exp: now + refresh_validity_days * 86400,
+        iss: format!("{domain}|login"),
+        sub: user_uuid.to_string(),
+        device: device_uuid.to_string(),
+        token: refresh_token.to_string(),
+        scope,
+    }
+}
 
-            // If the token failed to decode, it was probably one of the old style tokens that was just a Base64 string.
-            // We can generate a claim for them for backwards compatibility. Note that the password refresh claims don't
-            // check expiration or issuer, so they're not included here.
-            RefreshJwtClaims {
-                nbf: 0,
-                exp: 0,
-                iss: String::new(),
-                sub: AuthMethod::Password,
-                device_token: refresh_token.into(),
-                token: None,
-            }
-        }
-        Ok(claims) => claims,
-    };
+/// Decode a login access token.
+pub fn decode_login(token: &str, domain: &str, env: &Env) -> Result<LoginJwtClaims> {
+    let issuer = format!("{domain}|login");
+    decode_jwt(token, &issuer, env)
+}
 
-    // Get device by refresh token
-    let mut device = match Device::find_by_refresh_token(&refresh_claims.device_token, conn).await {
-        None => err!("Invalid refresh token"),
-        Some(device) => device,
-    };
+/// Decode a refresh token.
+pub fn decode_refresh(token: &str, domain: &str, env: &Env) -> Result<RefreshJwtClaims> {
+    let issuer = format!("{domain}|login");
+    decode_jwt(token, &issuer, env)
+}
 
-    // Save to update `updated_at`.
-    device.save(true, conn).await?;
+/// Extract user UUID from a Bearer token in the request.
+pub fn get_auth_user(req: &worker::Request, domain: &str, env: &Env) -> Result<LoginJwtClaims> {
+    let auth_header = req
+        .headers()
+        .get("Authorization")
+        .map_err(|_| Error::unauthorized("Missing Authorization header"))?
+        .ok_or_else(|| Error::unauthorized("Missing Authorization header"))?;
 
-    let user = match User::find_by_uuid(&device.user_uuid, conn).await {
-        None => err!("Impossible to find user"),
-        Some(user) => user,
-    };
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| Error::unauthorized("Invalid Authorization header format"))?;
 
-    let auth_tokens = match refresh_claims.sub {
-        AuthMethod::Sso if CONFIG.sso_enabled() && CONFIG.sso_auth_only_not_session() => {
-            AuthTokens::new(&device, &user, refresh_claims.sub, client_id)
-        }
-        AuthMethod::Sso if CONFIG.sso_enabled() => {
-            sso::exchange_refresh_token(&device, &user, client_id, refresh_claims).await?
-        }
-        AuthMethod::Sso => err!("SSO is now disabled, Login again using email and master password"),
-        AuthMethod::Password if CONFIG.sso_enabled() && CONFIG.sso_only() => err!("SSO is now required, Login again"),
-        AuthMethod::Password => AuthTokens::new(&device, &user, refresh_claims.sub, client_id),
-        _ => err!("Invalid auth method, cannot refresh token"),
-    };
+    decode_login(token, domain, env)
+}
 
-    Ok((device, auth_tokens))
+/// Validate that the security stamp in the JWT matches the user's current stamp.
+/// Call this after get_auth_user when you need to ensure the token hasn't been
+/// invalidated by a password change or security stamp rotation.
+pub async fn validate_security_stamp(
+    claims: &LoginJwtClaims,
+    d1: &worker::D1Database,
+) -> Result<()> {
+    let user: Option<crate::models::User> = crate::db::query_one(
+        d1,
+        "SELECT * FROM users WHERE uuid = ?1",
+        &[crate::db::val(&claims.sub)],
+    )
+    .await?;
+
+    let user = user.ok_or_else(|| Error::unauthorized("User not found"))?;
+
+    if user.security_stamp != claims.sstamp {
+        return Err(Error::unauthorized(
+            "Token has been invalidated. Please login again.",
+        ));
+    }
+    Ok(())
 }
