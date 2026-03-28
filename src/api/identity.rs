@@ -344,6 +344,7 @@ pub async fn register(mut req: Request, env: &Env) -> Result<Response> {
     if !signups_allowed {
         let email_check = body["email"].as_str().unwrap_or("").to_lowercase();
         #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
         struct Inv {
             email: String,
         }

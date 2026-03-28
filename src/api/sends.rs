@@ -86,12 +86,11 @@ pub async fn upload_file(mut req: Request, env: &Env, send_id: &str, file_id: &s
         return Err(Error::not_found("Send not found"));
     }
 
-    // Store file in R2
-    let r2 = env.bucket("ATTACHMENTS").map_err(|e| Error::internal(e.to_string()))?;
+    // Store file
     let file_data = req.bytes().await.map_err(|e| Error::bad_request(e.to_string()))?;
-    let r2_key = format!("sends/{}/{}", send_id, file_id);
+    let storage_key = format!("sends/{}/{}", send_id, file_id);
 
-    r2.put(&r2_key, file_data).execute().await.map_err(|e| Error::internal(format!("R2 upload failed: {e}")))?;
+    crate::storage::put(env, &storage_key, file_data).await?;
 
     // Update send data with file info
     let mut data: Value = serde_json::from_str(&send.data).unwrap_or(json!({}));
@@ -141,10 +140,13 @@ pub async fn delete(req: Request, env: &Env, send_id: &str) -> Result<Response> 
         return Err(Error::not_found("Send not found"));
     }
 
-    // Delete R2 files if file type
+    // Delete stored files if file type
     if send.atype == 1 {
-        if let Ok(r2) = env.bucket("ATTACHMENTS") {
-            let _ = r2.delete(&format!("sends/{}/", send_id)).await;
+        // Parse data to find file ID
+        if let Ok(data) = serde_json::from_str::<Value>(&send.data) {
+            if let Some(file_id) = data["id"].as_str() {
+                let _ = crate::storage::delete(env, &format!("sends/{}/{}", send_id, file_id)).await;
+            }
         }
     }
 
@@ -306,18 +308,8 @@ pub async fn download_file(req: Request, env: &Env, send_id: &str, file_id: &str
         }
     }
 
-    let r2 = env.bucket("ATTACHMENTS").map_err(|e| Error::internal(e.to_string()))?;
-    let r2_key = format!("sends/{}/{}", send_id, file_id);
-
-    let object = r2
-        .get(&r2_key)
-        .execute()
-        .await
-        .map_err(|e| Error::internal(format!("R2 error: {e}")))?
-        .ok_or_else(|| Error::not_found("File not found"))?;
-
-    let body = object.body().ok_or_else(|| Error::internal("Empty R2 object"))?;
-    let bytes = body.bytes().await.map_err(|e| Error::internal(e.to_string()))?;
+    let storage_key = format!("sends/{}/{}", send_id, file_id);
+    let bytes = crate::storage::get(env, &storage_key).await?.ok_or_else(|| Error::not_found("File not found"))?;
 
     let mut resp = Response::from_bytes(bytes).map_err(|e| Error::internal(e.to_string()))?;
     let _ = resp.headers_mut().set("Content-Type", "application/octet-stream");

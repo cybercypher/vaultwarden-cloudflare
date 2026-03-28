@@ -44,10 +44,13 @@ database_id = "YOUR_D1_DATABASE_ID"
 binding = "KV"
 id = "YOUR_KV_NAMESPACE_ID"
 
-# R2 Bucket for file attachments and sends
-[[r2_buckets]]
-binding = "ATTACHMENTS"
-bucket_name = "vaultwarden-attachments"
+# File storage: R2 or KV (auto-detected)
+# R2 is faster and supports larger files but may require a credit card.
+# If R2 is not configured, files are stored in KV (free, no CC, 25MB limit per file).
+# Uncomment below to enable R2:
+# [[r2_buckets]]
+# binding = "ATTACHMENTS"
+# bucket_name = "vaultwarden-attachments"
 
 # Durable Object for WebSocket push notifications
 [durable_objects]

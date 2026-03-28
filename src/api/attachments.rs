@@ -82,13 +82,12 @@ pub async fn upload(mut req: Request, env: &Env, cipher_id: &str, att_id: &str) 
         return Err(Error::not_found("Cipher not found"));
     }
 
-    // Store file in R2
-    let r2 = env.bucket("ATTACHMENTS").map_err(|e| Error::internal(e.to_string()))?;
+    // Store file
     let file_data = req.bytes().await.map_err(|e| Error::bad_request(e.to_string()))?;
     let file_size = file_data.len() as i64;
-    let r2_key = format!("attachments/{}/{}", cipher_id, att_id);
+    let storage_key = format!("attachments/{}/{}", cipher_id, att_id);
 
-    r2.put(&r2_key, file_data).execute().await.map_err(|e| Error::internal(format!("R2 upload failed: {e}")))?;
+    crate::storage::put(env, &storage_key, file_data).await?;
 
     // Update file size
     db::execute(&d1, "UPDATE attachments SET file_size = ?1 WHERE id = ?2", &[db::val_i64(file_size), db::val(att_id)])
@@ -149,10 +148,8 @@ pub async fn delete(req: Request, env: &Env, cipher_id: &str, att_id: &str) -> R
         return Err(Error::not_found("Cipher not found"));
     }
 
-    // Delete from R2
-    if let Ok(r2) = env.bucket("ATTACHMENTS") {
-        let _ = r2.delete(&format!("attachments/{}/{}", cipher_id, att_id)).await;
-    }
+    // Delete file from storage
+    let _ = crate::storage::delete(env, &format!("attachments/{}/{}", cipher_id, att_id)).await;
 
     // Delete from D1
     db::execute(

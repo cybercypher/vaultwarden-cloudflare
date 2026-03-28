@@ -230,6 +230,7 @@ pub async fn diagnostics(req: Request, env: &Env) -> Result<Response> {
         "domain": domain,
         "ssoEnabled": sso_enabled,
         "mailEnabled": mail_enabled,
+        "fileStorage": crate::storage::backend_name(env),
         "userCount": user_count.map(|c| c.count).unwrap_or(0),
         "cipherCount": cipher_count.map(|c| c.count).unwrap_or(0),
         "orgCount": org_count.map(|c| c.count).unwrap_or(0),

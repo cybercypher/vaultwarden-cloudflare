@@ -203,6 +203,18 @@ collect_config() {
   fi
 
   echo ""
+  echo -e "${BOLD}── File Storage ──${NC}"
+  echo ""
+  echo -e "  File storage is used for vault attachments and Bitwarden Send files."
+  echo -e "  Most users don't need this — passwords, logins, cards, notes are in the database."
+  echo ""
+  echo -e "    ${BOLD}kv${NC}  — Free, no credit card. 25MB per file, 1GB total. (recommended)"
+  echo -e "    ${BOLD}r2${NC}  — Faster, 5GB free. May require credit card on Cloudflare."
+  echo ""
+  askd "File storage backend (kv/r2)" "kv"
+  FILE_STORAGE="$REPLY"
+
+  echo ""
   echo -e "${BOLD}── Admin Panel ──${NC}"
   echo ""
   askd "Set an admin token? (leave blank to disable admin panel)" ""
@@ -243,7 +255,7 @@ confirm_deploy() {
   echo -e "  ${BOLD}Resources that will be created:${NC}"
   echo -e "    • D1 database: ${WORKER_NAME}"
   echo -e "    • KV namespace: ${WORKER_NAME}-kv"
-  echo -e "    • R2 bucket: ${WORKER_NAME}-attachments"
+  [ "$FILE_STORAGE" = "r2" ] && echo -e "    • R2 bucket: ${WORKER_NAME}-attachments"
   echo -e "    • Worker: ${WORKER_NAME}"
   [ "$DEPLOY_VAULT" = "yes" ] && echo -e "    • Pages project: ${PAGES_PROJECT}"
   [ -n "$CUSTOM_DOMAIN" ] && echo -e "    • Custom domain: ${CUSTOM_DOMAIN} (DNS records)"
@@ -301,10 +313,14 @@ do_deploy() {
   fi
   ok "KV namespace: ${KV_ID}"
 
-  # R2 Bucket
-  info "Creating R2 bucket '${WORKER_NAME}-attachments'..."
-  npx wrangler r2 bucket create "${WORKER_NAME}-attachments" 2>/dev/null || true
-  ok "R2 bucket: ${WORKER_NAME}-attachments"
+  # R2 Bucket (only if using R2)
+  if [ "$FILE_STORAGE" = "r2" ]; then
+    info "Creating R2 bucket '${WORKER_NAME}-attachments'..."
+    npx wrangler r2 bucket create "${WORKER_NAME}-attachments" 2>/dev/null || true
+    ok "R2 bucket: ${WORKER_NAME}-attachments"
+  else
+    ok "File storage: KV (no R2 needed)"
+  fi
 
   echo ""
   echo -e "${BOLD}── Step 2/7: Write wrangler.toml ──${NC}"
@@ -353,10 +369,6 @@ database_id = "${D1_ID}"
 binding = "KV"
 id = "${KV_ID}"
 
-[[r2_buckets]]
-binding = "ATTACHMENTS"
-bucket_name = "${WORKER_NAME}-attachments"
-
 [durable_objects]
 bindings = [
   { name = "NOTIFICATION_HUB", class_name = "NotificationHub" }
@@ -366,6 +378,16 @@ bindings = [
 tag = "v1"
 new_classes = ["NotificationHub"]
 TOMLEOF
+
+  # Add R2 binding if using R2 for file storage
+  if [ "$FILE_STORAGE" = "r2" ]; then
+    cat >> wrangler.toml << TOMLEOF
+
+[[r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "${WORKER_NAME}-attachments"
+TOMLEOF
+  fi
 
   # Add send_email binding if using Cloudflare Email Workers
   if [ "$USE_CF_EMAIL" = true ]; then

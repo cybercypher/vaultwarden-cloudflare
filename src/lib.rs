@@ -10,6 +10,7 @@ mod db;
 mod mail;
 mod models;
 mod notifications;
+mod storage;
 mod util;
 
 use serde_json::{json, Value};
